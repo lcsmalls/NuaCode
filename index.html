@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>NuaCode</title>
+	<!-- Requested fonts: Geologica (sans) and Google Sans Code (monospace) -->
+	<link href="https://fonts.googleapis.com/css2?family=Geologica:wght@400;600;700&display=swap" rel="stylesheet">
+	<link href="https://fonts.googleapis.com/css2?family=Google+Sans+Code:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root{
+  --bg:#0f1720;
+  --panel:#0b1220;
+  --muted:#9aa6b2;
+  --accent:#007acc;
+  --accent-2:#22c55e;
+  --sidebar:#071122;
+  --status:#06121a;
+  font-family: 'Geologica', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+}
+*{box-sizing:border-box}
+html,body,#app{height:100%;}
+body{
+	margin:0;
+	background:var(--bg);
+	color:#d7e0e8;
+	font-family:'Geologica', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+	-webkit-font-smoothing:antialiased;
+}
+#app{display:flex; height:100vh;}
+#sidebar{width:220px; background:linear-gradient(180deg,var(--sidebar),#081226); border-right:1px solid rgba(255,255,255,0.04); display:flex; flex-direction:column}
+.sidebar-header{display:flex; justify-content:space-between; align-items:center; padding:12px 10px; border-bottom:1px solid rgba(255,255,255,0.02)}
+.sidebar-header strong{font-weight:600}
+.sidebar-actions button{margin-left:6px; padding:6px 8px; background:transparent; color:var(--muted); border:1px solid rgba(255,255,255,0.03); border-radius:4px; cursor:pointer}
+#file-list{list-style:none; margin:0; padding:8px; overflow:auto; flex:1}
+#file-list li{padding:8px 10px; border-radius:4px; cursor:pointer; color:var(--muted); display:flex; justify-content:space-between; align-items:center}
+#file-list li:hover{background:rgba(255,255,255,0.02); color:#fff}
+.btn-close:hover{color:#fff}
+.tab:hover{background:rgba(255,255,255,0.01); color:#fff}
+.bottom-tab:hover{background:rgba(255,255,255,0.01)}
+.ctx-item{padding:6px 10px; cursor:pointer}
+.ctx-item:hover{background:rgba(255,255,255,0.02); color:#fff}
+
+/* Ace editor styling tweaks for a modern look */
+.ace_editor{background:#071018 !important; border-radius:6px; overflow:hidden}
+.ace_scroller{background:transparent}
+.ace_gutter{background:#061018; color:#57606a}
+.ace_gutter .ace_cursor{color:#fff}
+.ace_marker-layer .ace_selection{background:rgba(0,122,204,0.15)}
+.ace_cursor{border-left:2px solid #cbd5e1}
+.ace_content{color:#e6eef6}
+.tab{display:flex; align-items:center}
+.tab span:first-child{margin-right:8px}
+.bottom-tab{display:flex; align-items:center}
+.bottom-tab::before{content:''}
+#file-list li.active{background:rgba(0,122,204,0.13); color:#fff}
+
+#main{flex:1; display:flex; flex-direction:column}
+#topbar{height:44px; display:flex; align-items:center; justify-content:space-between; padding:0 10px; border-bottom:1px solid rgba(255,255,255,0.03); background:linear-gradient(180deg, rgba(255,255,255,0.01), transparent)}
+#tabs{display:flex; gap:6px; align-items:center; overflow:auto}
+.tab{padding:8px 12px; background:transparent; border-radius:4px; color:var(--muted); cursor:pointer}
+.tab.active{background:rgba(255,255,255,0.02); color:#fff; border:1px solid rgba(255,255,255,0.02)}
+#top-actions button{margin-left:8px; padding:6px 10px; border-radius:4px; background:var(--accent); border:none; color:#fff; cursor:pointer}
+
+#content{display:flex; flex:1; height:calc(100vh - 44px - 26px)}
+#editor-container{flex:1; display:flex; flex-direction:column; min-width:0}
+#editor-main{display:flex; flex:1; min-width:0}
+#editor{flex:1; width:100%; height:100%; font-family:'Google Sans Code', ui-monospace, SFMono-Regular, Menlo, Monaco, 'Roboto Mono', 'Courier New', monospace}
+#outline{width:200px; border-left:1px solid rgba(255,255,255,0.03); background:#041222; color:var(--muted); padding:8px; overflow:auto}
+#editor-header{height:32px; display:flex; align-items:center; padding:4px 10px; border-bottom:1px solid rgba(255,255,255,0.02); color:var(--muted)}
+#preview-container{width:40%; min-width:260px; border-left:1px solid rgba(255,255,255,0.03); background:#02101a}
+#preview{width:100%; height:100%; border:0; background:#fff}
+
+#statusbar{height:26px; display:flex; justify-content:space-between; align-items:center; padding:0 8px; background:var(--status); border-top:1px solid rgba(255,255,255,0.02); font-size:12px; color:var(--muted)}
+
+/* Responsive: hide preview on narrow screens */
+@media (max-width:900px){
+  #preview-container{display:none}
+}
+
+		/* Custom scrollbar styling */
+		/* WebKit */
+		#file-list, #outline-sidebar, .bottom-content, #terminal-output, #editor, #preview {
+			scrollbar-width: thin;
+			scrollbar-color: rgba(0,122,204,0.5) rgba(0,0,0,0.1);
+		}
+		#file-list::-webkit-scrollbar, #outline-sidebar::-webkit-scrollbar, .bottom-content::-webkit-scrollbar, #terminal-output::-webkit-scrollbar, #editor::-webkit-scrollbar, #preview::-webkit-scrollbar { width: 10px; height:10px }
+		#file-list::-webkit-scrollbar-track, #outline-sidebar::-webkit-scrollbar-track, .bottom-content::-webkit-scrollbar-track, #terminal-output::-webkit-scrollbar-track, #editor::-webkit-scrollbar-track, #preview::-webkit-scrollbar-track { background: transparent }
+		#file-list::-webkit-scrollbar-thumb, #outline-sidebar::-webkit-scrollbar-thumb, .bottom-content::-webkit-scrollbar-thumb, #terminal-output::-webkit-scrollbar-thumb, #editor::-webkit-scrollbar-thumb, #preview::-webkit-scrollbar-thumb { background: rgba(0,122,204,0.18); border-radius: 8px; }
+		#file-list::-webkit-scrollbar-thumb:hover, .bottom-content::-webkit-scrollbar-thumb:hover, #editor::-webkit-scrollbar-thumb:hover { background: rgba(0,122,204,0.28); }
+
+.btn-close{background:transparent; border:none; color:var(--muted); cursor:pointer}
+
+.small{font-size:12px}
+				#menubar{height:30px; display:flex; align-items:center; gap:12px; padding:4px 10px; border-bottom:1px solid rgba(255,255,255,0.02); background:linear-gradient(180deg, rgba(255,255,255,0.01), transparent);}
+	.menu{position:relative; color:var(--muted); padding:4px 8px; cursor:pointer; user-select:none;}
+	.menu:hover{color:#fff}
+	.dropdown{position:absolute; top:30px; left:0; background:var(--panel); border:1px solid rgba(255,255,255,0.03); display:none; min-width:140px; z-index:40; box-shadow:0 6px 18px rgba(0,0,0,0.6)}
+	.menu.open .dropdown{display:block}
+	.dropdown .item{padding:8px 10px; color:var(--muted); cursor:pointer}
+	.dropdown .item:hover{background:rgba(255,255,255,0.02); color:#fff}
+
+				/* Bottom panel */
+				#bottom-panel{display:block; height:160px}
+				#bottom-tabs{height:32px; display:flex; gap:6px; align-items:center; padding:4px 8px; background:#071018; border-top:1px solid rgba(255,255,255,0.02)}
+				.bottom-tab{background:transparent; color:var(--muted); padding:6px 10px; border-radius:4px; border:1px solid transparent; cursor:pointer}
+				.bottom-tab.active{background:rgba(255,255,255,0.02); color:#fff; border-color:rgba(255,255,255,0.03)}
+				#bottom-contents{height:calc(100% - 32px); background:#071018}
+				.bottom-content{height:100%; overflow:auto}
+				#problems #error-header{height:36px; display:flex; align-items:center; justify-content:space-between; padding:0 12px; border-bottom:1px solid rgba(255,255,255,0.02); color:var(--muted)}
+				#problems #error-list{list-style:none; margin:0; padding:8px; overflow:auto}
+				#problems #error-list li{padding:6px 8px; border-radius:4px; color:#ffb3b3}
+				#problems #error-list li .source{font-size:12px; color:var(--muted); margin-left:8px}
+				#problems .error-actions button{background:transparent; border:1px solid rgba(255,255,255,0.03); color:var(--muted); padding:6px 8px; border-radius:4px}
+
+			/* Splitter & zoom */
+			#splitter{width:8px; cursor:col-resize; background:transparent}
+			#splitter:hover{background:rgba(255,255,255,0.02)}
+			.zoom-controls{display:inline-flex; align-items:center; gap:6px; margin-left:8px}
+			.zoom-controls button{padding:4px 6px; background:transparent; border:1px solid rgba(255,255,255,0.03); color:var(--muted); border-radius:4px; cursor:pointer}
+			#zoom-range{width:90px}
+
+			/* UI scale via CSS variable */
+			:root{--ui-scale:1}
+			#app{transform-origin:0 0; transform:scale(var(--ui-scale)); width:calc(100% / var(--ui-scale)); height:calc(100% / var(--ui-scale));}
+
+    </style>
+</head>
+<body>
+	<div id="app">
+		<div id="sidebar">
+			<div class="sidebar-header">
+				<strong>NuaCode</strong>
+				<div class="sidebar-actions">
+					<button id="new-file">New</button>
+					<button id="save-file">Save</button>
+				</div>
+			</div>
+			<ul id="file-list"></ul>
+			<!-- Outline moved to bottom of sidebar, autocollapsed -->
+			<div id="outline-panel" class="outline-collapsed" title="Outline (click to expand)">
+			  <div id="outline-toggle" style="padding:8px; border-top:1px solid rgba(255,255,255,0.02); cursor:pointer; color:var(--muted);">Outline ▸</div>
+			  <div id="outline-sidebar" style="display:none; padding:8px; max-height:240px; overflow:auto; color:var(--muted);"></div>
+			</div>
+		</div>
+
+		<div id="main">
+			<!-- Menu bar (File, Edit, Selection, View, Run, Help) -->
+			<div id="menubar">
+				<div class="menu" id="menu-file">File
+					<div class="dropdown">
+						<div class="item" data-action="new">New File</div>
+						<div class="item" data-action="save">Save</div>
+						<div class="item" data-action="saveall">Save All</div>
+						<div class="item" data-action="pagename">Set Page Name</div>
+						<div class="item" data-action="rename">Rename File</div>
+						<div class="item" data-action="delete">Delete File</div>
+						<div class="item" data-action="download">Download File</div>
+						<div class="item" data-action="toggleOutline">Toggle Outline</div>
+						<div class="item" data-action="toggleProblems">Toggle Problems</div>
+						<div class="item" data-action="toggleTerminal">Toggle Terminal</div>
+					</div>
+				</div>
+				<div class="menu" id="menu-edit">Edit
+					<div class="dropdown">
+						<div class="item" data-action="undo">Undo</div>
+						<div class="item" data-action="redo">Redo</div>
+						<div class="item" data-action="tidy">Code Tidy</div>
+					</div>
+				</div>
+				<div class="menu" id="menu-selection">Selection
+					<div class="dropdown">
+						<div class="item" data-action="selectall">Select All</div>
+					</div>
+				</div>
+				<div class="menu" id="menu-view">View
+					<div class="dropdown">
+						<div class="item" data-action="togglepreview">Toggle Preview</div>
+						<div class="item" data-action="wordwrap">Toggle Word Wrap</div>
+					</div>
+				</div>
+				<div class="menu" id="menu-run">Run
+					<div class="dropdown">
+						<div class="item" data-action="run">Run Preview</div>
+						<div class="item" data-action="autoRefresh">Toggle Auto Refresh</div>
+					</div>
+				</div>
+				<div class="menu" id="menu-help">Help
+					<div class="dropdown">
+						<div class="item" data-action="about">About</div>
+					</div>
+				</div>
+			</div>
+			<div id="topbar">
+					<div id="tabs"></div>
+					<div id="top-actions">
+						<button id="run-preview">Run ▶</button>
+						<button id="stop-preview">Stop ■</button>
+						<button id="toggle-preview">Toggle Preview</button>
+						<button id="toggle-errors">Errors</button>
+						<!-- zoom controls removed -->
+					</div>
+				</div>
+
+			<div id="content">
+				<div id="editor-container">
+					<div id="editor-header"> <span id="editor-filename"></span> </div>
+					<div id="editor-main">
+												<div id="editor"></div>
+					</div>
+				</div>
+				<div id="splitter" role="separator" aria-orientation="vertical" title="Drag to resize" class="splitter" id="splitter-editor"></div>
+				<div id="preview-container">
+					<iframe id="preview" sandbox="allow-scripts allow-modals allow-forms allow-same-origin"></iframe>
+				</div>
+			</div>
+
+			<div id="statusbar">
+				<div id="status-left">Ready</div>
+				<div id="status-right">Ln 1, Col 1</div>
+			</div>
+
+			<!-- Bottom panel with tabs: Problems and Terminal -->
+			<div id="bottom-panel" style="display:block;">
+				<div id="bottom-tabs">
+					<button class="bottom-tab active" data-tab="problems">Problems</button>
+					<button class="bottom-tab" data-tab="terminal">Terminal</button>
+				</div>
+				<div id="bottom-contents">
+					<div id="problems" class="bottom-content">
+						<div id="error-header">
+							<span>Problems</span>
+							<div class="error-actions">
+								<button id="clear-errors">Clear</button>
+							</div>
+						</div>
+						<ul id="error-list"></ul>
+					</div>
+					<div id="terminal" class="bottom-content" style="display:none;">
+						<div id="terminal-output" style="padding:8px; height:120px; overflow:auto; background:#02060a; color:#cfcfcf; font-family:monospace; font-size:13px"></div>
+						<div id="terminal-input" style="padding:6px; border-top:1px solid rgba(255,255,255,0.02); background:#071018">
+							<input id="terminal-line" style="width:100%; box-sizing:border-box; padding:6px; background:#001018; color:#fff; border:1px solid rgba(255,255,255,0.03);" placeholder="Type a command (help) and press Enter">
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<!-- Ace Editor CDN (no integrity attribute to avoid blocking) -->
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.15.0/ace.js"></script>
+
+	<!-- Context menu -->
+	<div id="context-menu" style="position:fixed; display:none; z-index:9999; background:var(--panel); border:1px solid rgba(255,255,255,0.03); color:var(--muted); padding:6px; border-radius:4px;">
+		<div class="ctx-item" data-action="new">New File</div>
+		<div class="ctx-item" data-action="open">Open</div>
+        <div class="ctx-item" data-action="commentOut">Comment Out</div>
+        <div class="ctx-item" data-action="cut">Cut</div>
+        <div class="ctx-item" data-action="copy">Copy</div>
+        <div class="ctx-item" data-action="paste">Paste</div>
+		<div class="ctx-item" data-action="rename">Rename</div>
+		<div class="ctx-item" data-action="delete">Delete</div>
+		<div class="ctx-item" data-action="download">Download</div>
+	</div>
+	<script src="app.js"></script>
+</body>
+</html>
