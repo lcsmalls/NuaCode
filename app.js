@@ -48,7 +48,7 @@
 
     // If selection spans multiple rows, operate on all rows
     if(startRow !== endRow || sel.start.column !== sel.end.column){
-      const lines = session.getLines(startRow, endRow)
+      const lines = session.getLines(startRow, endRow + 1)
       if(style === 'line'){
         const allCommented = lines.every(l=> l.trim().startsWith(linePrefix))
         for(let r = startRow; r <= endRow; r++){
@@ -111,6 +111,12 @@
   let files = {}
   let tabs = [] // filenames
   let active = null
+  // per-file in-memory buffers track current edited content (unsaved)
+  const buffers = {}
+  // lastSaved holds the last persisted content for each file (used for gutter diffing)
+  const lastSaved = {}
+  // track which gutter rows we've decorated per-file so we can clear them
+  const gutterDecorations = {}
 
   // UI elements
   const fileListEl = document.getElementById('file-list')
@@ -201,7 +207,7 @@
     // keep menu items in sync with selection state
     try{ editor.getSession().on('change', ()=> { if(typeof updateMenuConditionals === 'function') updateMenuConditionals() }) }catch(e){}
     try{ editor.selection.on('changeSelection', ()=> { if(typeof updateMenuConditionals === 'function') updateMenuConditionals() }) }catch(e){}
-    // setup outline (simple AST-ish outline for HTML/JS)
+      // setup outline (simple AST-like outline for HTML/JS)
     try{
       const outlineEl = document.getElementById('outline-sidebar') || document.getElementById('outline-list')
       function buildOutline(){
@@ -287,6 +293,10 @@
       if(raw){ files = JSON.parse(raw) }
       else { files = {...DEFAULT_FILES} }
     }catch(e){ files = {...DEFAULT_FILES} }
+    // initialize lastSaved snapshots for gutter diffing
+    try{
+      Object.keys(files).forEach(n=> lastSaved[n] = files[n])
+    }catch(e){}
   }
   function saveToStorage(){
     localStorage.setItem(STORAGE_KEY, JSON.stringify(files))
@@ -294,7 +304,7 @@
 
   // Settings persistence: remembers UI options like word wrap, autoRefresh, ui-scale and bottom height
   const SETTINGS_KEY = 'mini_vsc_settings_v1'
-  let settings = { wordWrap: false, autoRefresh: false, uiScale: 1, lintOnSave: true, lintOnType: true }
+  let settings = { wordWrap: false, autoRefresh: false, uiScale: 1, lintOnSave: true, lintOnType: true, autoSave: false }
   function loadSettings(){
     try{ const s = localStorage.getItem(SETTINGS_KEY); if(s) settings = Object.assign(settings, JSON.parse(s)) }catch(e){}
   }
@@ -355,8 +365,9 @@
       del.addEventListener('click', (e)=>{ e.stopPropagation(); deleteFile(name) })
       li.appendChild(del)
 
-      // show dirty indicator if file differs from saved version
-      const dirty = (name === active && editor) ? (editor.getValue() !== (files[name]||'')) : false
+      // show dirty indicator if buffer differs from saved version (works for non-active files)
+      const buf = (buffers.hasOwnProperty(name)) ? buffers[name] : ( (name === active && editor) ? editor.getValue() : files[name] || '' )
+      const dirty = buf !== (files[name]||'')
       if(dirty){
         const d = document.createElement('span')
         d.className = 'dirty-indicator'
@@ -552,15 +563,14 @@
       label.addEventListener('click', ()=> openFile(name))
       label.textContent = name
 
-      // dirty indicator for active unsaved file
-      if(name === active && editor){
-        const isDirty = editor.getValue() !== (files[name]||'')
-        if(isDirty){
-          const d = document.createElement('span')
-          d.className = 'dirty-indicator'
-          d.title = 'Unsaved changes'
-          label.appendChild(d)
-        }
+      // dirty indicator for unsaved files (checks buffers)
+      const buf = (buffers.hasOwnProperty(name)) ? buffers[name] : ( (name === active && editor) ? editor.getValue() : files[name] || '' )
+      const isDirty = buf !== (files[name]||'')
+      if(isDirty){
+        const d = document.createElement('span')
+        d.className = 'dirty-indicator'
+        d.title = 'Unsaved changes'
+        label.appendChild(d)
       }
 
       t.appendChild(ico)
@@ -577,16 +587,23 @@
   function openFile(name){
     if(!(name in files)) return
     // persist current editor buffer before switching
+    const prevActive = active
     if(active && editor){
-      files[active] = editor.getValue()
-      saveToStorage()
+      // persist editor content into buffers (not immediately into saved files)
+      // NOTE: we intentionally do NOT write to `files` here to avoid
+      // autosaving on file switch; explicit Save should update `files`.
+      buffers[active] = editor.getValue()
     }
+    // clear gutter decorations from previous file so markers don't leak between files
+    try{ if(prevActive && prevActive !== name && typeof clearGutterDecorations === 'function') clearGutterDecorations(prevActive) }catch(e){}
     active = name
     if(!tabs.includes(name)) tabs.push(name)
     renderTabs()
     renderFileList()
     editor.session.setMode(modeFor(name))
-    editor.setValue(files[name] || '', -1)
+    // load buffer if present, otherwise saved file
+    const textToLoad = buffers.hasOwnProperty(name) ? buffers[name] : (files[name] || '')
+    editor.setValue(textToLoad, -1)
     editor.focus()
     const filenameEl = document.getElementById('editor-filename')
     if(filenameEl) filenameEl.textContent = name
@@ -597,9 +614,13 @@
     try{ const bp = document.getElementById('bottom-panel'); if(bp) bp.style.display = 'block' }catch(e){}
     // refresh outline for the new file
     try{ if(typeof buildOutlineFn === 'function') buildOutlineFn() }catch(e){}
+    // refresh gutter decorations for modified lines
+    try{ if(typeof updateGutterDecorations === 'function') updateGutterDecorations() }catch(e){}
   }
 
   function closeTab(name){
+    // clear any decorations for the file being closed to avoid leftover markers
+    try{ if(typeof clearGutterDecorations === 'function') clearGutterDecorations(name) }catch(e){}
     const i = tabs.indexOf(name)
     if(i>=0) tabs.splice(i,1)
     if(name===active){
@@ -732,12 +753,18 @@
 
   function saveCurrent(){
     if(!active) { showDialog('Save','No active file'); return }
-    files[active] = editor.getValue()
+    const cur = editor.getValue()
+    files[active] = cur
+    // saved -> update buffer to match saved state
+    buffers[active] = cur
     saveToStorage()
+    // update lastSaved snapshot for gutter diffing
+    try{ lastSaved[active] = cur }catch(e){}
     updateStatus('Saved ' + active)
     // update indicators
     renderTabs()
     renderFileList()
+    try{ if(typeof updateGutterDecorations === 'function') updateGutterDecorations() }catch(e){}
     // run lint if enabled
     try{ if(settings.lintOnSave) runLint() }catch(e){}
   }
@@ -745,6 +772,8 @@
   function saveAll(){
     // save all open files; ensure current editor is saved
     if(active && editor) files[active] = editor.getValue()
+    // update lastSaved snapshots for all files we just saved
+    try{ Object.keys(files).forEach(n=> lastSaved[n] = files[n]) }catch(e){}
     saveToStorage()
     updateStatus('Saved all files')
     try{ if(settings.lintOnSave) runLint() }catch(e){}
@@ -994,9 +1023,16 @@
 
   function runPreview(){
     try{
-      // persist current edits before running preview
-      if(active && editor) files[active] = editor.getValue()
-      saveToStorage()
+      // persist current edits into buffers; only write to saved `files` when autosave is enabled
+      if(active && editor){
+        buffers[active] = editor.getValue()
+        if(settings && settings.autoSave){
+          files[active] = editor.getValue()
+          saveToStorage()
+          // update lastSaved snapshot for gutter markers
+          try{ lastSaved[active] = files[active] }catch(e){}
+        }
+      }
       // revoke any previously created auxiliary blob URLs (module script blobs)
       try{
         if(window._miniVSC_auxUrls && Array.isArray(window._miniVSC_auxUrls)){
@@ -1349,22 +1385,45 @@
     ensureJSHintLoaded(()=>{
       // simple run across .js files
       const findings = []
+      // Lint JS files with modern ES settings to avoid false positives
+      const jshintOptions = {
+        // Use a modern ES version to support optional chaining and newer syntax.
+        // Avoid `esnext`; `esversion` is sufficient and avoids incompatible-option warnings.
+        esversion: 11, // allow modern JS (ES2020+), includes optional chaining
+        moz: true,
+        browser: true,
+        undef: false,
+        node: false,
+        loopfunc: true // allow functions declared within loops
+      }
       Object.keys(files).forEach(name=>{
         if(!name.endsWith('.js')) return
         try{
-          JSHINT(files[name])
+          JSHINT(files[name], jshintOptions)
           const errs = JSHINT.data().errors || []
-          errs.forEach(e=>{ if(e) findings.push({file:name, line: e.line || 0, message: e.reason || e.code || 'Lint issue'}) })
+          errs.forEach(e=>{
+            if(!e) return
+            // skip some noisy warnings that are handled by modern options
+            const msg = e.reason || e.code || 'Lint issue'
+            findings.push({file:name, line: e.line || 0, message: msg})
+          })
         }catch(e){ findings.push({file:name, line:0, message: 'Lint failed: '+ String(e)}) }
       })
       // remove previous lint entries
       errors = errors.filter(x=> x.kind !== 'lint')
-      if(findings.length===0){
+      // dedupe findings by file:line:message
+      const seen = new Set()
+      const uniqueFindings = []
+      findings.forEach(f=>{
+        const key = `${f.file}::${f.line}::${f.message}`
+        if(!seen.has(key)){ seen.add(key); uniqueFindings.push(f) }
+      })
+      if(uniqueFindings.length===0){
         // If no lint findings and no other problems, keep Problems panel clean. We'll show a green 'no problems' message in renderErrors when errors is empty.
         renderErrors()
         return
       }
-      findings.slice(0,200).forEach(f=> errors.unshift({ kind: 'lint', message: f.message, source: f.file, line: f.line }))
+      uniqueFindings.slice(0,200).forEach(f=> errors.unshift({ kind: 'lint', message: f.message, source: f.file, line: f.line }))
       errors = errors.slice(0,200)
       renderErrors()
     })
@@ -1423,11 +1482,13 @@
 
           // Prepare menu visibility for scope-based items
           const isFile = !!filename
+          const isProblems = !!target.closest('#problems') || !!target.closest('#error-list')
           Array.from(ctx.querySelectorAll('.ctx-item')).forEach(it=>{
             const scope = it.getAttribute('data-scope') || 'both'
             if(scope === 'both') it.style.display = ''
             else if(scope === 'file') it.style.display = isFile? '': 'none'
             else if(scope === 'global') it.style.display = isFile? 'none': ''
+            else if(scope === 'problems') it.style.display = isProblems ? '' : 'none'
           })
 
           // Temporarily show offscreen to measure size, then position so it doesn't overflow
@@ -1447,7 +1508,7 @@
 
           ctx.style.left = left + 'px'
           ctx.style.top = top + 'px'
-          ctx.dataset.target = filename || ''
+          ctx.dataset.target = filename || (isProblems ? 'problems' : '')
         })
       // hide context menu on any left-click outside
       document.addEventListener('mousedown', (e)=>{
@@ -1455,6 +1516,22 @@
           ctx.style.display = 'none'
         }
       })
+      // hookup selection menu button
+      try{
+        const selBtn = document.getElementById('selection-button')
+        const selDrop = document.getElementById('selection-dropdown')
+        if(selBtn && selDrop){
+          selBtn.addEventListener('click', (e)=>{
+            e.stopPropagation()
+            selDrop.style.display = (selDrop.style.display === 'none' || selDrop.style.display === '') ? 'block' : 'none'
+            updateSelectionMenu()
+          })
+          // hide on outside click
+          document.addEventListener('click', ()=>{ try{ selDrop.style.display = 'none' }catch(e){} })
+          // wire selection dropdown items
+          selDrop.querySelectorAll('.sel-item').forEach(it=> it.addEventListener('click', (ev)=>{ const a = it.getAttribute('data-action'); handleMenuAction(a); selDrop.style.display='none' }))
+        }
+      }catch(e){}
     }
   }
 
@@ -1490,6 +1567,11 @@
         saveSettings(); break }
       case 'restoreSettings':{
         loadSettings(); applySettings(); updateStatus('Settings restored'); break }
+      case 'toggleAutosave':{
+        settings.autoSave = !settings.autoSave
+        try{ const el = document.getElementById('autosave-item'); if(el) el.textContent = 'Autosave: ' + (settings.autoSave? 'On':'Off') }catch(e){}
+        saveSettings(); updateStatus('Autosave ' + (settings.autoSave? 'enabled':'disabled'))
+        break }
       case 'resetSettings':{
         settings = { wordWrap:false, autoRefresh:false, uiScale:1 }; saveSettings(); applySettings(); updateStatus('Settings reset'); break }
       case 'save': saveCurrent(); break
@@ -1514,6 +1596,33 @@
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url; a.download = target; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url)
+        break }
+      case 'copyPath':{
+        const target = ctxTarget || active
+        if(!target){ showDialog('Copy Path','No target'); break }
+        const txt = target
+        if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(()=> updateStatus('Path copied')) .catch(()=> fallbackCopy(txt)) }
+        else fallbackCopy(txt)
+        break }
+      case 'revealFile':{
+        const target = ctxTarget || active
+        if(!target){ showDialog('Reveal','No target'); break }
+        // open file and ensure it's visible in file list
+        openFile(target)
+        // focus sidebar list item if present
+        try{ const li = Array.from(document.querySelectorAll('#file-list li')).find(l=> l.dataset && l.dataset.name === target); if(li) li.scrollIntoView({block:'center'}); }catch(e){}
+        break }
+      case 'copyErrors':{
+        // copy the current Problems list to clipboard
+        const listText = (errors && errors.length>0) ? errors.map(e=>{
+          const src = (e.source || '') + (e.line ? (':' + e.line) : '')
+          if(e.kind === 'lint') return `${src} - ${e.message}`
+          return `[${e.kind}] ${src} - ${e.message}`
+        }).join('\n\n') : 'No problems'
+
+        if(navigator.clipboard && navigator.clipboard.writeText){
+          navigator.clipboard.writeText(listText).then(()=> updateStatus('Errors copied')) .catch(()=> { fallbackCopy(listText) })
+        }else{ fallbackCopy(listText) }
         break }
       case 'downloadAll':{
         // simple project export as JSON containing all files
@@ -1643,6 +1752,63 @@
       case 'run': runPreview(); break
       case 'about': showDialog('About','UNDER DEVELOPMENT!') ; break
       
+      // Selection menu actions
+      case 'selectionUpper':{
+        if(!editor) break
+        const txt = editor.getSelectedText()
+        if(!txt) break
+        editor.session.replace(editor.getSelectionRange(), txt.toUpperCase())
+        break }
+      case 'selectionLower':{
+        if(!editor) break
+        const txt = editor.getSelectedText()
+        if(!txt) break
+        editor.session.replace(editor.getSelectionRange(), txt.toLowerCase())
+        break }
+      case 'findSelection':{
+        const q = editor && editor.getSelectedText ? editor.getSelectedText() : ''
+        if(!q) { showDialog('Find','No selection'); break }
+        // open search panel and perform search (case-insensitive by default)
+        const panel = document.getElementById('search-panel')
+        const input = document.getElementById('search-input')
+        const caseEl = document.getElementById('search-case')
+        if(panel && input){ panel.style.display = ''; input.value = q; if(caseEl) caseEl.checked = false; input.dispatchEvent(new Event('input')) }
+        break }
+
+      // Tools
+      case 'trimWhitespace':{
+        if(!editor) break
+        const all = editor.getValue()
+        const cleaned = all.split('\n').map(l=> l.replace(/\s+$/,'')).join('\n')
+        editor.setValue(cleaned, -1)
+        updateStatus('Trimmed whitespace')
+        break }
+      case 'convertTabsToSpaces':{
+        if(!editor) break
+        const ts = editor.getSession().getTabSize() || 2
+        const re = new RegExp('\t','g')
+        const out = editor.getValue().replace(re, ' '.repeat(ts))
+        editor.setValue(out, -1)
+        updateStatus('Converted tabs to spaces')
+        break }
+      case 'convertSpacesToTabs':{
+        if(!editor) break
+        const ts = editor.getSession().getTabSize() || 2
+        const re = new RegExp(' {' + ts + '}','g')
+        const out = editor.getValue().replace(re, '\t')
+        editor.setValue(out, -1)
+        updateStatus('Converted spaces to tabs')
+        break }
+      case 'toggleLineNumbers':{
+        if(!editor) break
+        try{
+          const show = !editor.renderer.isShowingGutter
+          // some versions expose property; fall back to toggling classes
+          if(typeof editor.renderer.setShowGutter === 'function') editor.renderer.setShowGutter(show)
+          else editor.renderer.isShowingGutter = show
+          updateStatus('Toggled line numbers')
+        }catch(e){ console.error('toggleLineNumbers', e) }
+        break }
     }
   }
 
@@ -1658,6 +1824,64 @@
         Array.from(document.querySelectorAll('.menu.open')).forEach(m=> m.classList.remove('open'))
       }
     }catch(e){ }
+  }
+
+  // Render the Problems / Errors panel. Placed at top-level so other
+  // modules (lint, preview message handler, etc.) can call it.
+  function renderErrors(){
+    try{
+      const errorList = document.getElementById('error-list')
+      const bottomPanel = document.getElementById('bottom-panel')
+      if(!errorList) return
+      errorList.innerHTML = ''
+      if(!errors || errors.length === 0){
+        const liEmpty = document.createElement('li')
+        liEmpty.className = 'no-problems'
+        liEmpty.textContent = 'No problems have been detected'
+        errorList.appendChild(liEmpty)
+        // ensure bottom panel visible when asked
+        if(bottomPanel) bottomPanel.style.display = 'block'
+        return
+      }
+      errors.forEach(err=>{
+        const li = document.createElement('li')
+        const heading = document.createElement('div')
+        // Do not prefix lint messages with [lint]; show kind for other types
+        heading.textContent = (err.kind === 'lint') ? (err.message || '') : (`[${err.kind}] ${err.message}`)
+        heading.style.fontFamily = "'Google Sans Code', ui-monospace, SFMono-Regular, Menlo, Monaco, 'Roboto Mono', 'Courier New', monospace"
+        heading.style.fontSize = '13px'
+        heading.style.marginBottom = '4px'
+        li.appendChild(heading)
+
+        const src = document.createElement('div')
+        src.className = 'source'
+        src.textContent = (err.source || '') + (err.line? `:${err.line}` : '')
+        src.style.fontFamily = 'inherit'
+        li.appendChild(src)
+        if(err.stack){
+          const pre = document.createElement('pre')
+          pre.textContent = ('' + err.stack).split('\n').slice(0,6).join('\n')
+          pre.style.whiteSpace = 'pre-wrap'
+          pre.style.marginTop = '6px'
+          pre.style.fontSize = '12px'
+          pre.style.color = 'rgba(255,255,255,0.85)'
+          pre.style.background = 'transparent'
+          li.appendChild(pre)
+        }
+        li.style.cursor = 'pointer'
+        li.addEventListener('click', ()=>{
+          const file = err.source || 'index.html'
+          if(file && (file in files)){
+            openFile(file)
+            if(err.line && editor) editor.gotoLine(err.line, 0, true)
+          } else {
+            if('index.html' in files) openFile('index.html')
+          }
+        })
+        errorList.appendChild(li)
+      })
+      if(bottomPanel) bottomPanel.style.display = 'block'
+    }catch(e){ console.error('renderErrors', e) }
   }
 
   // Duplicate selection or current line if no selection
@@ -1719,19 +1943,102 @@
 
   // status updates: line/col
   function updateCursorStatus(){
-    const pos = editor.getCursorPosition()
-    statusRight.textContent = `Ln ${pos.row+1}, Col ${pos.column+1}`
+    try{
+      const pos = editor.getCursorPosition()
+      const posEl = document.getElementById('status-pos')
+      const spacesEl = document.getElementById('status-spaces')
+      const encEl = document.getElementById('status-enc')
+      const langEl = document.getElementById('status-lang')
+      if(posEl) posEl.textContent = `Ln ${pos.row+1}, Col ${pos.column+1}`
+      // tab size / indent info
+      try{
+        const ts = editor.getSession().getTabSize()
+        if(spacesEl) spacesEl.textContent = `Spaces: ${ts}`
+      }catch(e){ if(spacesEl) spacesEl.textContent = 'Spaces: ?' }
+      if(encEl) encEl.textContent = 'UTF-8'
+      if(langEl){
+        const lang = active ? (active.split('.').pop() || '').toUpperCase() : 'TEXT'
+        langEl.textContent = lang
+      }
+      // update gutter decorations showing modified lines
+      try{ if(typeof updateGutterDecorations === 'function') updateGutterDecorations() }catch(e){}
+    }catch(e){ /* ignore when editor not ready */ }
+  }
+
+  // Gutter diffing: mark lines that differ from last saved snapshot
+  function clearGutterDecorations(filename){
+    try{
+      if(!editor) return
+      const sess = editor.getSession()
+      const prev = gutterDecorations[filename] || { modified: [], saved: [] }
+      prev.modified.forEach(r => {
+        try{ if(typeof sess.removeGutterDecoration === 'function') sess.removeGutterDecoration(r, 'line-modified'); }catch(e){}
+      })
+      prev.saved.forEach(r => {
+        try{ if(typeof sess.removeGutterDecoration === 'function') sess.removeGutterDecoration(r, 'line-saved'); }catch(e){}
+      })
+      gutterDecorations[filename] = { modified: [], saved: [] }
+    }catch(e){}
+  }
+
+  function updateGutterDecorations(){
+    try{
+      if(!editor || !active) return
+      const sess = editor.getSession()
+      const curText = editor.getValue() || ''
+      const curLines = curText.split('\n')
+      const savedText = (lastSaved[active] || '')
+      const savedLines = savedText.split('\n')
+      // clear previous decorations for this file
+      clearGutterDecorations(active)
+      const modifiedRows = []
+      const savedRows = []
+      const max = Math.max(curLines.length, savedLines.length)
+      for(let i=0;i<max;i++){
+        const a = curLines[i] || ''
+        const b = savedLines[i] || ''
+        if(a !== b){
+          // mark modified line (orange)
+          try{ if(typeof sess.addGutterDecoration === 'function') sess.addGutterDecoration(i, 'line-modified') }catch(e){}
+          modifiedRows.push(i)
+        }else{
+          // mark saved/unchanged line (green)
+          try{ if(typeof sess.addGutterDecoration === 'function') sess.addGutterDecoration(i, 'line-saved') }catch(e){}
+          savedRows.push(i)
+        }
+      }
+      gutterDecorations[active] = { modified: modifiedRows, saved: savedRows }
+    }catch(e){ console.error('updateGutterDecorations', e) }
+  }
+
+  // Update the small selection menu in the topbar (enable/disable actions)
+  function updateSelectionMenu(){
+    try{
+      const menu = document.getElementById('menu-selection')
+      if(!menu) return
+      const hasSel = !!(editor && editor.getSelectedText && editor.getSelectedText().length>0)
+      Array.from(menu.querySelectorAll('.conditional.selection')).forEach(el=>{ el.style.display = hasSel? '' : 'none' })
+      // close the menu if nothing selected
+      if(!hasSel) menu.classList.remove('open')
+    }catch(e){}
   }
 
   // init
   function init(){
     loadFromStorage()
+    // load UI settings (including autosave) and apply them
+    try{ loadSettings(); applySettings() }catch(e){}
     renderFileList()
     // open index.html by default
     const defaultOpen = Object.keys(files).includes('index.html')? 'index.html' : Object.keys(files)[0]
     if(defaultOpen) openFile(defaultOpen)
     // ensure menu conditionals reflect initial selection state
     try{ if(typeof updateMenuConditionals === 'function') updateMenuConditionals() }catch(e){}
+
+    // update selection menu UI initially
+    try{ if(typeof updateSelectionMenu === 'function') updateSelectionMenu() }catch(e){}
+    // reflect autosave state in the File menu
+    try{ const a = document.getElementById('autosave-item'); if(a) a.textContent = 'Autosave: ' + (settings.autoSave? 'On':'Off') }catch(e){}
 
     // initialize searcher UI
     try{ if(typeof createSearcherUI === 'function') createSearcherUI() }catch(e){}
@@ -1802,57 +2109,9 @@
     const terminalOutput = document.getElementById('terminal-output')
     const terminalLine = document.getElementById('terminal-line')
     // errors is a module-global (see top of file)
-
-    function renderErrors(){
-        errorList.innerHTML = ''
-        if(!errors || errors.length === 0){
-          const liEmpty = document.createElement('li')
-          liEmpty.className = 'no-problems'
-          liEmpty.textContent = 'No problems have been detected'
-          errorList.appendChild(liEmpty)
-          return
-        }
-        errors.forEach(err=>{
-        const li = document.createElement('li')
-        const heading = document.createElement('div')
-        heading.textContent = `[${err.kind}] ${err.message}`
-        heading.style.fontFamily = "'Google Sans Code', ui-monospace, SFMono-Regular, Menlo, Monaco, 'Roboto Mono', 'Courier New', monospace"
-        heading.style.fontSize = '13px'
-        heading.style.marginBottom = '4px'
-        li.appendChild(heading)
-
-        const src = document.createElement('div')
-        src.className = 'source'
-        src.textContent = err.source + (err.line? `:${err.line}` : '')
-        src.style.fontFamily = 'inherit'
-        li.appendChild(src)
-        if(err.stack){
-          const pre = document.createElement('pre')
-          pre.textContent = ('' + err.stack).split('\n').slice(0,6).join('\n')
-          pre.style.whiteSpace = 'pre-wrap'
-          pre.style.marginTop = '6px'
-          pre.style.fontSize = '12px'
-          pre.style.color = 'rgba(255,255,255,0.85)'
-          pre.style.background = 'transparent'
-          li.appendChild(pre)
-        }
-        // clicking an error opens the file if available
-        li.style.cursor = 'pointer'
-        li.addEventListener('click', ()=>{
-          const file = err.source || 'index.html'
-          if(file && (file in files)){
-            openFile(file)
-            if(err.line && editor) editor.gotoLine(err.line, 0, true)
-          } else {
-            // try index.html
-            if('index.html' in files){ openFile('index.html') }
-          }
-        })
-        errorList.appendChild(li)
-      })
-      // ensure bottom panel visible
-      if(bottomPanel) bottomPanel.style.display = 'block'
-    }
+    // NOTE: `renderErrors` was moved to the top-level scope so it can be
+    // called from runLint() and other places. The top-level implementation
+    // queries DOM elements on each call.
 
     clearBtn.onclick = ()=>{ errors = []; renderErrors() }
     toggleErrors.onclick = ()=>{
@@ -2039,12 +2298,15 @@
     // editor change handler (only if editor available)
     if(editor){
       editor.on('change', ()=>{
-        // mark unsaved (simple)
-        if(active) {
+        try{
+          if(active) buffers[active] = editor.getValue()
           scheduleDirtyUpdate()
           debouncedRun()
-        }
+          debouncedLint()
+        }catch(e){}
       })
+      editor.selection.on('changeSelection', ()=>{ try{ updateMenuConditionals(); updateSelectionMenu() }catch(e){} })
+      editor.selection.on('changeCursor', ()=>{ try{ updateCursorStatus() }catch(e){} })
     }
 
     // keyboard shortcuts
