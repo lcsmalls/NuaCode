@@ -113,6 +113,8 @@
   let active = null
   // per-file in-memory buffers track current edited content (unsaved)
   const buffers = {}
+  // per-file Ace EditSession instances so each file has its own undo history
+  const sessions = {}
   // lastSaved holds the last persisted content for each file (used for gutter diffing)
   const lastSaved = {}
   // track which gutter rows we've decorated per-file so we can clear them
@@ -176,6 +178,27 @@
 
   function setupEditor(){
     editor = ace.edit('editor')
+    // Remove Ace's built-in settings shortcut (Ctrl+, / Command+,) which
+    // opens an editor settings panel that we don't want in this UI.
+    try{
+      const cmds = editor && editor.commands && editor.commands.commands
+      if(cmds){
+        Object.keys(cmds).forEach(name => {
+          try{
+            const cmd = cmds[name]
+            const bk = cmd && cmd.bindKey
+            let win = null, mac = null
+            if(typeof bk === 'string') { win = bk; mac = bk }
+            else if(bk && typeof bk === 'object') { win = bk.win; mac = bk.mac }
+            const hasCtrlComma = (s)=> !!(s && typeof s === 'string' && s.toLowerCase().includes(',') && s.toLowerCase().includes('ctrl'))
+            const hasCmdComma = (s)=> !!(s && typeof s === 'string' && s.toLowerCase().includes(',') && (s.toLowerCase().includes('command') || s.toLowerCase().includes('cmd')))
+            if(hasCtrlComma(win) || hasCmdComma(mac)){
+              try{ editor.commands.removeCommand(name) }catch(_){ }
+            }
+          }catch(e){}
+        })
+      }
+    }catch(e){}
     editor.setTheme('ace/theme/monokai')
     editor.setOptions({fontSize:14, showPrintMargin:false})
     editor.session.setMode('ace/mode/html')
@@ -304,7 +327,7 @@
 
   // Settings persistence: remembers UI options like word wrap, autoRefresh, ui-scale and bottom height
   const SETTINGS_KEY = 'mini_vsc_settings_v1'
-  let settings = { wordWrap: false, autoRefresh: false, uiScale: 1, lintOnSave: true, lintOnType: true, autoSave: false }
+  let settings = { wordWrap: false, autoRefresh: false, uiScale: 1, lintOnSave: true, lintOnType: true, autoSave: false, includeAllResources: false }
   function loadSettings(){
     try{ const s = localStorage.getItem(SETTINGS_KEY); if(s) settings = Object.assign(settings, JSON.parse(s)) }catch(e){}
   }
@@ -347,6 +370,7 @@
       try{ ico.innerHTML = iconFor(name) }catch(e){ ico.textContent = '' }
 
       const nameSpan = document.createElement('span')
+      nameSpan.className = 'file-name'
       nameSpan.textContent = name
       nameSpan.style.flex = '1'
       nameSpan.style.cursor = 'pointer'
@@ -446,63 +470,90 @@
   }
 
   // Start inline rename of a file (blur-safe, inline errors)
-  function startRename(oldName){
-    const li = Array.from(document.querySelectorAll('#file-list li')).find(x=> x.dataset && x.dataset.name === oldName)
+  function startRename(currentName){
+    console.log('mini-vsc: startRename invoked for', currentName)
+    const list = document.getElementById('file-list')
+    if(!list) return
+    const li = Array.from(list.querySelectorAll('li')).find(l=> l.dataset && l.dataset.name === currentName)
     if(!li) return
-    const label = li.querySelector('span:nth-child(2)')
-    const cur = oldName
+    const labelSpan = li.querySelector('.file-name')
+    if(!labelSpan) return
+    // hide the label and insert an input in its place. The label may be
+    // nested inside a child container, so insert into its parent to avoid
+    // DOMNotFound errors when using insertBefore on `li` directly.
+    const labelParent = labelSpan.parentNode || li
+    labelSpan.style.display = 'none'
     const input = document.createElement('input')
-    input.value = cur
+    input.type = 'text'
+    input.value = currentName
     input.style.flex = '1'
-    input.style.padding = '6px'
+    input.style.padding = '6px 8px'
     input.style.borderRadius = '6px'
     input.style.border = '1px solid rgba(255,255,255,0.04)'
+    input.style.background = 'rgba(255,255,255,0.02)'
+    input.style.color = 'var(--muted)'
     const err = document.createElement('div')
     err.style.color = '#ff6b6b'
     err.style.fontSize = '12px'
     err.style.marginTop = '6px'
     err.style.display = 'none'
-    li.replaceChild(input, label)
-    li.insertBefore(err, input.nextSibling)
+    // insert before the label within its parent
+    try{ labelParent.insertBefore(input, labelSpan) }catch(e){ labelParent.appendChild(input) }
+    try{ labelParent.insertBefore(err, input.nextSibling) }catch(e){ labelParent.appendChild(err) }
     input.focus(); input.select()
 
     function showInlineError(msg){ err.textContent = msg; err.style.display = ''; input.focus(); input.select() }
-    function revert(){ li.replaceChild(label, input); if(err && err.parentNode) err.parentNode.removeChild(err) }
+    function revert(){ if(input && input.parentNode) input.parentNode.removeChild(input); if(err && err.parentNode) err.parentNode.removeChild(err); labelSpan.style.display = '' }
 
-    const finish = ()=>{
-      const raw = input.value.trim()
-      if(!raw){ revert(); return }
-      let safe = raw.replace(/\\/g,'/').split('/').pop()
+    function finishRename(newName){
+      newName = (newName || '').trim()
+      if(!newName){ revert(); return }
+      let safe = newName.replace(/\\/g,'/').split('/').pop()
       if(!/\.[a-z0-9]+$/i.test(safe)){
-        const origExt = (oldName && oldName.split('.').pop()) || ''
+        const origExt = (currentName && currentName.split('.').pop()) || ''
         if(origExt) safe = safe + '.' + origExt
       }
-      if(safe === oldName){ revert(); return }
+      if(safe === currentName){ revert(); return }
       const existsKey = Object.keys(files).find(k => k.toLowerCase() === safe.toLowerCase())
-      if(safe.toLowerCase() !== oldName.toLowerCase() && existsKey){
-        const list = document.getElementById('file-list')
-        const found = list && Array.from(list.querySelectorAll('li')).find(li=> li.dataset && li.dataset.name && li.dataset.name.toLowerCase() === existsKey.toLowerCase())
+      if(safe.toLowerCase() !== currentName.toLowerCase() && existsKey){
+        const found = Array.from(list.querySelectorAll('li')).find(li=> li.dataset && li.dataset.name && li.dataset.name.toLowerCase() === existsKey.toLowerCase())
         if(found && found.offsetParent !== null){ revert(); openFile(existsKey); return }
         showInlineError('A file named "' + safe + '" already exists.')
         return
       }
-      files[safe] = files[oldName]
-      delete files[oldName]
-      const ti = tabs.indexOf(oldName)
+      files[safe] = files[currentName]
+      delete files[currentName]
+      const ti = tabs.indexOf(currentName)
       if(ti>=0) tabs[ti] = safe
-      if(active === oldName) active = safe
+      if(active === currentName) active = safe
       saveToStorage()
       if(err && err.parentNode) err.parentNode.removeChild(err)
       renderFileList(); renderTabs();
     }
 
-    input.addEventListener('keydown', (e)=>{ if(e.key==='Enter') finish(); else if(e.key==='Escape'){ revert() } })
-    input.addEventListener('blur', ()=> { setTimeout(()=>{ if(document.activeElement !== input) finish() }, 120) })
+    input.addEventListener('keydown', (e)=>{ if(e.key === 'Enter') { finishRename(input.value) } else if(e.key === 'Escape') { revert() } })
+    // blur cancels/commits silently: prefer cancelling to avoid modal loops
+    input.addEventListener('blur', ()=>{ setTimeout(()=>{ if(document.activeElement !== input) { finishRename(input.value) } }, 120) })
   }
 
   // Keep references to the inline implementations (these appear earlier)
   try{ if(typeof startCreateFile === 'function') var startCreateFileInline = startCreateFile }catch(e){}
   try{ if(typeof startRename === 'function') var startRenameInline = startRename }catch(e){}
+
+  // Add Multi-edit toggle into the Selection menu (provides multi-cursor support)
+  try{
+    const selMenu = document.getElementById('menu-selection')
+    if(selMenu){
+      const dd = selMenu.querySelector('.dropdown')
+      if(dd){
+        const item = document.createElement('div')
+        item.className = 'item'
+        item.setAttribute('data-action','toggleMultiEdit')
+        item.textContent = 'Toggle Multi-edit'
+        dd.appendChild(item)
+      }
+    }
+  }catch(e){ console.warn('add multi-edit menu failed', e) }
 
   function iconFor(name){
     if(name.endsWith('.html')) return svgIcon('html')
@@ -534,7 +585,7 @@
     if(ti >= 0) tabs.splice(ti,1)
     if(active === name){
       active = tabs.length? tabs[Math.max(0,ti-1)]: null
-      if(active && editor) editor.setValue(files[active]||'', -1)
+      if(active && editor) openFile(active)
     }
     saveToStorage()
     renderFileList()
@@ -600,10 +651,39 @@
     if(!tabs.includes(name)) tabs.push(name)
     renderTabs()
     renderFileList()
-    editor.session.setMode(modeFor(name))
-    // load buffer if present, otherwise saved file
-    const textToLoad = buffers.hasOwnProperty(name) ? buffers[name] : (files[name] || '')
-    editor.setValue(textToLoad, -1)
+    // Use a per-file session (preserves per-file undo/redo and state)
+    function attachSessionEventsOnce(sess){
+      try{
+        if(sess._miniVscEventsAttached) return
+        sess._miniVscEventsAttached = true
+        sess.on('change', ()=>{
+          // schedule dirty update and other per-session reactions
+          scheduleDirtyUpdate()
+          try{ if(typeof updateCursorStatus === 'function') updateCursorStatus() }catch(e){}
+          try{ if(typeof updateMenuConditionals === 'function') updateMenuConditionals() }catch(e){}
+          try{ if(typeof updateGutterDecorations === 'function') updateGutterDecorations() }catch(e){}
+          try{ if(typeof buildOutlineFn === 'function') buildOutlineFn() }catch(e){}
+        })
+      }catch(e){}
+    }
+
+    function getSessionFor(name){
+      if(sessions[name]){
+        // ensure mode is correct
+        try{ sessions[name].setMode(modeFor(name)) }catch(e){}
+        return sessions[name]
+      }
+      const text = Object.prototype.hasOwnProperty.call(buffers, name) ? buffers[name] : (files[name] || '')
+      const sess = ace.createEditSession(text, modeFor(name))
+      // give each session its own undo manager so undos don't cross files
+      try{ sess.setUndoManager(new ace.UndoManager()) }catch(e){}
+      attachSessionEventsOnce(sess)
+      sessions[name] = sess
+      return sess
+    }
+
+    const session = getSessionFor(name)
+    editor.setSession(session)
     editor.focus()
     const filenameEl = document.getElementById('editor-filename')
     if(filenameEl) filenameEl.textContent = name
@@ -625,7 +705,7 @@
     if(i>=0) tabs.splice(i,1)
     if(name===active){
       active = tabs.length? tabs[Math.max(0,i-1)]: null
-      if(active) editor.setValue(files[active]||'', -1)
+      if(active) openFile(active)
     }
     renderTabs(); renderFileList();
   }
@@ -694,62 +774,7 @@
     input.addEventListener('blur', ()=>{ setTimeout(()=>{ if(document.activeElement !== input) cleanup() }, 120) })
   }
 
-  // Inline rename: replace label with input prefilled with current name
-  function startRename(currentName){
-    const list = document.getElementById('file-list')
-    if(!list) return
-    const li = Array.from(list.querySelectorAll('li')).find(l=> l.dataset && l.dataset.name === currentName)
-    if(!li) return
-    const spans = li.querySelectorAll('span')
-    const labelSpan = spans && spans[1]
-    if(labelSpan) labelSpan.style.display = 'none'
-    const input = document.createElement('input')
-    input.type = 'text'
-    input.value = currentName
-    input.style.flex = '1'
-    input.style.padding = '6px 8px'
-    input.style.borderRadius = '6px'
-    input.style.border = '1px solid rgba(255,255,255,0.04)'
-    input.style.background = 'rgba(255,255,255,0.02)'
-    input.style.color = 'var(--muted)'
-    const err = document.createElement('div')
-    err.style.color = '#ff6b6b'
-    err.style.fontSize = '12px'
-    err.style.marginTop = '6px'
-    err.style.display = 'none'
-    li.insertBefore(input, labelSpan)
-    li.insertBefore(err, input.nextSibling)
-    input.focus(); input.select()
 
-    function showInlineError(msg){ err.textContent = msg; err.style.display = ''; input.focus(); input.select() }
-    function revert(){ if(input && input.parentNode) input.parentNode.removeChild(input); if(err && err.parentNode) err.parentNode.removeChild(err); if(labelSpan) labelSpan.style.display = '' }
-
-    function finishRename(newName){
-      newName = (newName || '').trim()
-      if(!newName){ revert(); return }
-      let safe = newName.replace(/\\/g,'/').split('/').pop()
-      // if user omitted an extension, preserve original extension
-      if(!/\.[a-z0-9]+$/i.test(safe)){
-        const origExt = (currentName && currentName.split('.').pop()) || ''
-        if(origExt) safe = safe + '.' + origExt
-      }
-      if(safe === currentName){ revert(); return }
-      const existsKey = Object.keys(files).find(k => k.toLowerCase() === safe.toLowerCase())
-      if(safe.toLowerCase() !== currentName.toLowerCase() && existsKey){ showInlineError('A file named "' + safe + '" already exists.'); return }
-      files[safe] = files[currentName]
-      delete files[currentName]
-      const ti = tabs.indexOf(currentName)
-      if(ti>=0) tabs[ti] = safe
-      if(active === currentName) active = safe
-      saveToStorage()
-      if(err && err.parentNode) err.parentNode.removeChild(err)
-      renderFileList(); renderTabs();
-    }
-
-    input.addEventListener('keydown', (e)=>{ if(e.key === 'Enter') { finishRename(input.value) } else if(e.key === 'Escape') { revert() } })
-    // blur cancels/commits silently: prefer cancelling to avoid modal loops
-    input.addEventListener('blur', ()=>{ setTimeout(()=>{ if(document.activeElement !== input) { finishRename(input.value) } }, 120) })
-  }
 
   function saveCurrent(){
     if(!active) { showDialog('Save','No active file'); return }
@@ -792,7 +817,14 @@
 
   // Build preview by taking index.html (if present) and injecting css/js
   function buildPreview(){
-    const rawHtml = files['index.html'] || (active && active.endsWith('.html')? files[active] : `<!doctype html><html><head><meta charset="utf-8"><title>Preview</title></head><body></body></html>`)
+    // helper to prefer unsaved buffer content when available
+    function getContent(name){
+      try{ if(!name) return '' }catch(e){}
+      if(buffers && Object.prototype.hasOwnProperty.call(buffers, name)) return buffers[name]
+      return files[name] || ''
+    }
+
+    const rawHtml = getContent('index.html') || (active && active.endsWith('.html')? getContent(active) : `<!doctype html><html><head><meta charset="utf-8"><title>Preview</title></head><body></body></html>`)
 
     // Parse with DOMParser so we can inline local resources (styles/scripts)
     const parser = new DOMParser()
@@ -872,7 +904,7 @@
     // first create simple blob URLs for all files so we can reference them
     jsFiles.forEach(name => {
       try{
-        const raw = files[name] || ''
+        const raw = getContent(name) || ''
         const b = new Blob([raw + '\n//# sourceURL=' + name], {type: 'text/javascript'})
         const u = URL.createObjectURL(b)
         window._miniVSC_auxUrls.push(u)
@@ -886,7 +918,7 @@
     const moduleSources = {}
     jsFiles.forEach(name => {
       try{
-        const raw = files[name] || ''
+        const raw = getContent(name) || ''
         const rewritten = rewriteImportsForSource(raw)
         moduleSources[name] = rewritten + '\n//# sourceURL=' + name
         // also create a blob URL as a fallback (not used for module injection)
@@ -955,29 +987,38 @@
         // non-module: inline directly to preserve execution order
         const inline = doc.createElement('script')
         inline.type = script.getAttribute('type') || 'text/javascript'
-        inline.text = files[resolved] + '\n//# sourceURL=' + resolved
+        inline.text = getContent(resolved) + '\n//# sourceURL=' + resolved
         script.parentNode.replaceChild(inline, script)
         injected.add(resolved)
       }
     })
 
-    // Also append all other .css/.js files that aren't explicitly referenced to keep previous behavior
-    // CSS: append at end of head
+    // Ensure `head` and `body` exist for later injections (monitor, scripts, etc.)
     const head = doc.head || doc.getElementsByTagName('head')[0] || doc.createElement('head')
-    const cssNames = Object.keys(files).filter(n => n !== 'index.html' && n.endsWith('.css'))
-    if(cssNames.length){
-      const style = doc.createElement('style')
-      style.textContent = cssNames.map(n=>`/* ${n} */\n${files[n]}`).join('\n')
-      head.appendChild(style)
-    }
-    // JS: append at end of body
     const body = doc.body || doc.getElementsByTagName('body')[0] || doc.createElement('body')
-    const jsNames = Object.keys(files).filter(n => n !== 'index.html' && n.endsWith('.js') && !(injected && injected.has && injected.has(n)))
-    if(jsNames.length){
-      const script = doc.createElement('script')
-      script.type = 'text/javascript'
-      script.text = jsNames.map(n=>`// ${n}\n${files[n]}`).join('\n') + '\n//# sourceURL=combined.js'
-      body.appendChild(script)
+
+    // Optionally append other files that weren't explicitly referenced.
+    // Default behaviour is to NOT auto-append unreferenced CSS/JS so the
+    // preview matches only what's linked from `index.html`. This can be
+    // enabled with the `includeAllResources` setting for backwards
+    // compatibility if desired.
+    if(settings && settings.includeAllResources){
+      // CSS: append at end of head
+      const cssNames = Object.keys(files).filter(n => n !== 'index.html' && n.endsWith('.css'))
+      if(cssNames.length){
+        const style = doc.createElement('style')
+        style.textContent = cssNames.map(n=>`/* ${n} */\n${getContent(n)}`).join('\n')
+        head.appendChild(style)
+      }
+      // JS: append at end of body
+      const jsNames = Object.keys(files).filter(n => n !== 'index.html' && n.endsWith('.js') && !(injected && injected.has && injected.has(n)))
+      if(jsNames.length){
+        const script = doc.createElement('script')
+        script.type = 'text/javascript'
+        script.text = jsNames.map(n=>`// ${n}\n${getContent(n)}`).join('\n') + '\n//# sourceURL=combined.js'
+        body.appendChild(script)
+      }
+      
     }
 
     // Add error-forwarding script: capture errors and console.error, postMessage to parent
@@ -1263,6 +1304,13 @@
       }
     }catch(e){ /* non-fatal */ }
     input.addEventListener('input', debounce(()=> performSearch(), 160))
+    // When Enter is pressed in the search box, focus the next match
+    input.addEventListener('keydown', (e)=>{
+      if(e.key === 'Enter'){
+        e.preventDefault()
+        nextMatch()
+      }
+    })
     caseBox && caseBox.addEventListener('change', ()=> performSearch())
     nextBtn && nextBtn.addEventListener('click', ()=> nextMatch())
     prevBtn && prevBtn.addEventListener('click', ()=> prevMatch())
@@ -1392,6 +1440,7 @@
         esversion: 11, // allow modern JS (ES2020+), includes optional chaining
         moz: true,
         browser: true,
+        asi: true,
         undef: false,
         node: false,
         loopfunc: true // allow functions declared within loops
@@ -1401,10 +1450,26 @@
         try{
           JSHINT(files[name], jshintOptions)
           const errs = JSHINT.data().errors || []
+          // Filter out specific noisy/false-positive warnings that are
+          // frequently triggered by valid patterns in this editor.
+          // Keep a slightly broader regex to catch small wording differences
+          // across JSHint versions and also support filtering by error code
+          // when available.
+          const noisyRe = /(reassignment of|which is a function|function declarations should not be placed in blocks|missing semicolon)/i
+          const noisyCodes = new Set(['W033','W083','W093','W087'])
           errs.forEach(e=>{
             if(!e) return
-            // skip some noisy warnings that are handled by modern options
-            const msg = e.reason || e.code || 'Lint issue'
+            // JSHint may populate different fields depending on version: check several
+            const parts = [e.reason, e.code, e.raw, e.evidence, e.description].filter(Boolean).map(String)
+            const combined = parts.join(' | ')
+            // If message text contains noisy substrings or the code is in noisyCodes, skip
+            const code = (e.code || '').toString()
+            if(noisyRe.test(combined) || (code && noisyCodes.has(code))){
+              console.log('mini-vsc: lint suppressed noisy', name, 'line', e.line, '->', combined, 'code=', code)
+              return
+            }
+            // Otherwise include the finding (use the most descriptive available text)
+            const msg = e.reason || e.raw || e.code || 'Lint issue'
             findings.push({file:name, line: e.line || 0, message: msg})
           })
         }catch(e){ findings.push({file:name, line:0, message: 'Lint failed: '+ String(e)}) }
@@ -1465,11 +1530,13 @@
         const it = e.target.closest('.ctx-item')
         if(!it) return
         const action = it.getAttribute('data-action')
+        console.log('mini-vsc: context menu click', action, 'target=', ctx.dataset.target || ctx.dataset.lastActionTarget)
         // set dataset target for context actions
         const target = ctx.dataset.target || ''
         ctx.dataset.lastActionTarget = target
-        handleMenuAction(action)
+        // hide the context menu immediately to avoid UI interference
         ctx.style.display = 'none'
+        handleMenuAction(action)
       })
       // prevent default context menu and show our menu on right click
         document.addEventListener('contextmenu', (e)=>{
@@ -1574,6 +1641,23 @@
         break }
       case 'resetSettings':{
         settings = { wordWrap:false, autoRefresh:false, uiScale:1 }; saveSettings(); applySettings(); updateStatus('Settings reset'); break }
+      case 'autoRefresh':{
+        // Toggle auto-refresh setting (Run menu)
+        settings.autoRefresh = !settings.autoRefresh
+        autoRefresh = !!settings.autoRefresh
+        saveSettings()
+        updateStatus('Auto-refresh ' + (autoRefresh? 'enabled':'disabled'))
+        break
+      }
+      case 'toggleMultiEdit':{
+        try{
+          settings.multiEdit = !settings.multiEdit
+          if(editor && editor.setOption) editor.setOption('enableMultiselect', !!settings.multiEdit)
+          saveSettings()
+          updateStatus('Multi-edit ' + (settings.multiEdit? 'enabled':'disabled'))
+        }catch(e){ console.error('toggleMultiEdit', e) }
+        break
+      }
       case 'save': saveCurrent(); break
       case 'saveall': saveAll(); break
       case 'rename':{
@@ -2042,6 +2126,17 @@
 
     // initialize searcher UI
     try{ if(typeof createSearcherUI === 'function') createSearcherUI() }catch(e){}
+
+    // Remove Settings menu items from File menu to simplify the UI
+    try{
+      const fileMenu = document.getElementById('menu-file')
+      if(fileMenu){
+        const toRemove = fileMenu.querySelectorAll('.item[data-action="saveSettings"], .item[data-action="restoreSettings"], .item[data-action="resetSettings"], .item[data-action="toggleAutosave"]')
+        toRemove.forEach(n=> n.parentNode && n.parentNode.removeChild(n))
+        // hide autosave item if still present
+        try{ const a = document.getElementById('autosave-item'); if(a) a.parentNode && a.parentNode.removeChild(a) }catch(e){}
+      }
+    }catch(e){ console.warn('remove settings menu failed', e) }
 
     // events
     newBtn.onclick = createNewFile
