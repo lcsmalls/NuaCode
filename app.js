@@ -4,19 +4,7 @@
 
   // default files
   const DEFAULT_FILES = {
-    'index.html': `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <title>Preview</title>
-  </head>
-  <body>
-    <h1>Hello from index.html</h1>
-    <div id="app"></div>
-  </body>
-</html>`,
-    'styles.css': `body{font-family:Inter,Arial,sans-serif;color:#0a0a0a;padding:20px} h1{color:#007acc}`,
-    'script.js': `console.log('Hello from script.js')`
+    // start empty by default per user request
   }
 
   // Toggle comment for selection or current line, language-aware by filename
@@ -274,10 +262,32 @@
         if(items.length===0){ outlineEl.textContent = 'No outline entries' ; return }
         items.forEach(it=>{
           const el = document.createElement('div')
-          el.textContent = it.label
-          el.style.padding = '4px 6px'
+          el.className = 'outline-item'
+          el.style.display = 'flex'
+          el.style.justifyContent = 'space-between'
+          el.style.padding = '6px 8px'
           el.style.cursor = 'pointer'
           el.style.color = 'var(--muted)'
+          const left = document.createElement('div')
+          left.style.display = 'flex'
+          left.style.gap = '8px'
+          const kind = document.createElement('span')
+          kind.className = 'outline-kind'
+          kind.textContent = (it.label && it.label.split(' ')[0]) || ''
+          kind.style.opacity = '0.8'
+          kind.style.fontSize = '12px'
+          kind.style.color = 'var(--muted)'
+          const lbl = document.createElement('span')
+          lbl.textContent = it.label
+          lbl.style.fontSize = '13px'
+          left.appendChild(kind)
+          left.appendChild(lbl)
+          const rn = document.createElement('span')
+          rn.textContent = (it.line+1)
+          rn.style.opacity = '0.6'
+          rn.style.fontSize = '12px'
+          el.appendChild(left)
+          el.appendChild(rn)
           el.addEventListener('click', ()=>{
             editor.focus()
             editor.gotoLine(it.line+1, 0, true)
@@ -291,6 +301,178 @@
       editor.selection.on('changeCursor', ()=> {})
       setTimeout(()=> buildOutline(), 200)
     }catch(e){ console.warn('outline not available', e) }
+
+    // --- Occurrence highlighting & multi-change support ---
+    try{
+      const Range = ace.require && ace.require('ace/range') ? ace.require('ace/range').Range : null
+      let occMarkerIds = []
+      let lastClickedTerm = null
+      let lastClickedType = null
+
+      function clearOccurrenceHighlights(){
+        try{
+          // Remove markers from the session they were created on. Support
+          // both legacy numeric ids and {id, sess} objects.
+          occMarkerIds.forEach(obj=>{
+            try{
+              if(typeof obj === 'number'){
+                try{ editor.getSession().removeMarker(obj) }catch(_){ }
+              }else if(obj && obj.id && obj.sess && typeof obj.sess.removeMarker === 'function'){
+                try{ obj.sess.removeMarker(obj.id) }catch(_){ }
+              }else if(obj && obj.id){
+                try{ editor.getSession().removeMarker(obj.id) }catch(_){ }
+              }
+            }catch(e){}
+          })
+          occMarkerIds = []
+        }catch(e){}
+      }
+
+      function tokenMatches(a, b){
+        // robust comparison: compare base token families before '.' and allow substring matches
+        if(!a || !b) return false
+        try{
+          const A = String(a).split('.')[0]
+          const B = String(b).split('.')[0]
+          if(A === B) return true
+          if(String(b).indexOf(String(a)) !== -1) return true
+          if(String(a).indexOf(String(b)) !== -1) return true
+        }catch(e){ }
+        return false
+      }
+
+      function highlightOccurrences(term, tokenType){
+        clearOccurrenceHighlights()
+        if(!term || !term.trim()) return
+        const s = editor.getSession(); const doc = s.getDocument(); const lines = doc.getAllLines()
+        const needle = term
+
+        // Prefer token-aware matching when tokenType provided
+        for(let r=0;r<lines.length;r++){
+          try{
+            const toks = s.getTokens(r) || []
+            let col = 0
+            for(let ti=0; ti<toks.length; ti++){
+              const tk = toks[ti]
+              const raw = (tk.value || '')
+              const norm = raw.replace(/[<>\\/]/g,'').trim()
+              const matchesType = tokenType ? tokenMatches(tokenType, tk.type) : true
+              if(matchesType && norm && norm === needle){
+                // compute start column for this token by using accumulated col
+                const startCol = col
+                const endCol = startCol + raw.length
+                // validate range values before adding marker to avoid orphan markers
+                if(Range && Number.isFinite(startCol) && Number.isFinite(endCol) && endCol > startCol){
+                  const lineLen = (lines[r] || '').length
+                  if(startCol >= 0 && startCol <= lineLen && endCol >= 0 && endCol <= lineLen + 1){
+                    const range = new Range(r, startCol, r, endCol)
+                    try{ const id = s.addMarker(range, 'ace_occurrence', 'text', false); if(typeof id !== 'undefined' && id !== null){ occMarkerIds.push({id: id, sess: s}) } else { console.warn('mini-vsc: occurrence addMarker returned invalid id', range, s===editor.getSession()) } }catch(e){ console.warn('mini-vsc: addMarker error', e) }
+                  }
+                }
+              }
+              col += (tk.value || '').length
+            }
+          }catch(e){
+            // fallback to simple substring search per-line
+            const line = lines[r] || ''
+            let idx = 0
+            while(true){
+              const found = line.indexOf(needle, idx)
+              if(found === -1) break
+              const startCol = found
+              const endCol = found + Math.max(1, needle.length)
+              if(Range && Number.isFinite(startCol) && Number.isFinite(endCol) && endCol > startCol){
+                const lineLen = (line || '').length
+                if(startCol >= 0 && startCol <= lineLen && endCol >= 0 && endCol <= lineLen + 1){
+                  const range = new Range(r, startCol, r, startCol + needle.length)
+                  try{ const id = s.addMarker(range, 'ace_occurrence', 'text', false); if(typeof id !== 'undefined' && id !== null){ occMarkerIds.push({id: id, sess: s}) } else { console.warn('mini-vsc: occurrence addMarker returned invalid id', range, s===editor.getSession()) } }catch(e){ console.warn('mini-vsc: addMarker error', e) }
+                }
+              }
+              idx = found + Math.max(1, needle.length)
+            }
+          }
+        }
+      }
+
+      function handleClickOrSelect(e){
+        try{
+          // If there's an active selection (user dragged), prefer that
+          const selRange = editor && editor.getSelectionRange && editor.getSelectionRange()
+          if(selRange && !selRange.isEmpty && !selRange.isEmpty()){
+            const selected = editor.getSelectedText() || ''
+            if(selected && selected.trim()){
+              lastClickedTerm = selected
+              lastClickedType = null
+              window._miniVSC._lastClickedTermVal = lastClickedTerm
+              window._miniVSC._lastClickedTypeVal = lastClickedType
+              highlightOccurrences(selected, null)
+              try{ const el = document.querySelector('[data-action="changeAll"]'); if(el) el.style.display = '' }catch(e){}
+              return
+            }
+          }
+
+          const pos = (e && e.getDocumentPosition) ? e.getDocumentPosition() : (editor && editor.getCursorPosition && editor.getCursorPosition())
+          if(!pos) return
+          const tok = (editor.session && editor.session.getTokenAt) ? editor.session.getTokenAt(pos.row, pos.column) : null
+          let term = ''
+          let tokenType = null
+          if(tok){ tokenType = tok.type; term = (tok.value||'').replace(/[<>\\/]/g,'').trim() }
+          if(!term){
+            const wr = editor.session.getWordRange(pos.row, pos.column)
+            term = editor.session.getTextRange(wr) || ''
+          }
+          if(term && term.trim()){
+            lastClickedTerm = term
+            lastClickedType = tokenType
+            window._miniVSC._lastClickedTermVal = term
+            window._miniVSC._lastClickedTypeVal = tokenType
+            highlightOccurrences(term, tokenType)
+            try{ const el = document.querySelector('[data-action="changeAll"]'); if(el) el.style.display = '' }catch(e){}
+          }else{
+            lastClickedTerm = null
+            lastClickedType = null
+            window._miniVSC._lastClickedTermVal = null
+            window._miniVSC._lastClickedTypeVal = null
+            clearOccurrenceHighlights()
+            try{ const el = document.querySelector('[data-action="changeAll"]'); if(el) el.style.display = 'none' }catch(e){}
+          }
+        }catch(e){}
+      }
+
+      // wire both click and mouseup (covers click and drag selection end)
+      editor.on('click', handleClickOrSelect)
+      try{ editor.on('mouseup', handleClickOrSelect) }catch(e){}
+      try{ editor.selection && editor.selection.on && editor.selection.on('changeSelection', function(){ setTimeout(()=>{ try{ handleClickOrSelect() }catch(e){} }, 10) }) }catch(e){}
+
+      // expose helper on window for debugging
+      window._miniVSC = window._miniVSC || {}
+      window._miniVSC.highlightOccurrences = highlightOccurrences
+      window._miniVSC.clearOccurrenceHighlights = clearOccurrenceHighlights
+      window._miniVSC._lastClickedTerm = () => window._miniVSC._lastClickedTermVal || lastClickedTerm
+      window._miniVSC._lastClickedType = () => window._miniVSC._lastClickedTypeVal || lastClickedType
+      window._miniVSC._lastClickedTermVal = window._miniVSC._lastClickedTermVal || null
+      window._miniVSC._lastClickedTypeVal = window._miniVSC._lastClickedTypeVal || null
+    }catch(e){ console.warn('occurrence highlighting failed', e) }
+
+    // Remove any pre-existing custom markers (from prior runs or older bugs)
+    function removeCustomMarkersFromSession(sess){
+      try{
+        if(!sess || typeof sess.getMarkers !== 'function') return
+        const markers = sess.getMarkers(false) || {}
+        Object.keys(markers).forEach(k=>{
+          try{
+            const m = markers[k]
+            const cls = (m && m.clazz) ? m.clazz : (m && m.clazzName) ? m.clazzName : ''
+            if(!cls) return
+            if(cls.indexOf('ace_occurrence')!==-1 || cls.indexOf('ace_search_highlight')!==-1 || cls.indexOf('ace_search_active')!==-1){
+              try{ sess.removeMarker(Number(k)) }catch(e){}
+            }
+          }catch(e){}
+        })
+      }catch(e){}
+    }
+    try{ removeCustomMarkersFromSession(editor.getSession()) }catch(e){}
+
   }
 
   // helper debounce
@@ -327,7 +509,7 @@
 
   // Settings persistence: remembers UI options like word wrap, autoRefresh, ui-scale and bottom height
   const SETTINGS_KEY = 'mini_vsc_settings_v1'
-  let settings = { wordWrap: false, autoRefresh: false, uiScale: 1, lintOnSave: true, lintOnType: true, autoSave: false, includeAllResources: false }
+  let settings = { wordWrap: false, autoRefresh: false, uiScale: 1, lintOnSave: true, lintOnType: true, autoSave: false, includeAllResources: false, lineEnding: 'LF' }
   function loadSettings(){
     try{ const s = localStorage.getItem(SETTINGS_KEY); if(s) settings = Object.assign(settings, JSON.parse(s)) }catch(e){}
   }
@@ -583,11 +765,28 @@
     delete files[name]
     const ti = tabs.indexOf(name)
     if(ti >= 0) tabs.splice(ti,1)
+    // clear any in-memory buffers/sessions/metadata for the deleted file
+    try{ delete buffers[name] }catch(e){}
+    try{
+      if(sessions[name]){
+        try{ if(typeof sessions[name].destroy === 'function') sessions[name].destroy() }catch(e){}
+        delete sessions[name]
+      }
+    }catch(e){}
+    try{ delete lastSaved[name] }catch(e){}
+    try{ delete gutterDecorations[name] }catch(e){}
     if(active === name){
       active = tabs.length? tabs[Math.max(0,ti-1)]: null
       if(active && editor) openFile(active)
+      else {
+        // no active file -> clear editor and show placeholder
+        try{ if(editor) editor.setValue('', -1) }catch(e){}
+        try{ const filenameEl = document.getElementById('editor-filename'); if(filenameEl) filenameEl.textContent = '' }catch(e){}
+        try{ const ph = document.getElementById('editor-placeholder'); if(ph) ph.style.display = 'flex' }catch(e){}
+      }
     }
-    saveToStorage()
+    // persist change
+    try{ saveToStorage(); saveSettings(); }catch(e){}
     renderFileList()
     renderTabs()
     updateStatus('Deleted ' + name)
@@ -647,6 +846,7 @@
     }
     // clear gutter decorations from previous file so markers don't leak between files
     try{ if(prevActive && prevActive !== name && typeof clearGutterDecorations === 'function') clearGutterDecorations(prevActive) }catch(e){}
+    try{ if(window._miniVSC && window._miniVSC.clearOccurrenceHighlights) window._miniVSC.clearOccurrenceHighlights() }catch(e){}
     active = name
     if(!tabs.includes(name)) tabs.push(name)
     renderTabs()
@@ -687,6 +887,8 @@
     editor.focus()
     const filenameEl = document.getElementById('editor-filename')
     if(filenameEl) filenameEl.textContent = name
+    // breadcrumb
+    try{ const bc = document.getElementById('editor-breadcrumb'); if(bc) bc.innerHTML = '<span class="crumb">/</span> <span id="editor-file-name-text" style="font-weight:600;color:var(--accent-2)">' + escapeHtml(name) + '</span>' }catch(e){}
     // update document title to reflect active file
     try{ document.title = 'NuaCode - ' + name }catch(e){}
     updateStatus('Opened ' + name)
@@ -696,6 +898,10 @@
     try{ if(typeof buildOutlineFn === 'function') buildOutlineFn() }catch(e){}
     // refresh gutter decorations for modified lines
     try{ if(typeof updateGutterDecorations === 'function') updateGutterDecorations() }catch(e){}
+    // hide placeholder (we have an active file now)
+    try{ const ph = document.getElementById('editor-placeholder'); if(ph) ph.style.display = 'none' }catch(e){}
+    // persist last-opened tabs / active file
+    try{ settings.lastTabs = tabs.slice(); settings.lastActive = active; saveSettings() }catch(e){}
   }
 
   function closeTab(name){
@@ -708,6 +914,10 @@
       if(active) openFile(active)
     }
     renderTabs(); renderFileList();
+    // persist last-opened tabs
+    try{ settings.lastTabs = tabs.slice(); settings.lastActive = active; saveSettings() }catch(e){}
+    // if no active file show placeholder
+    if(!active){ try{ const ph = document.getElementById('editor-placeholder'); if(ph) ph.style.display = 'flex' }catch(e){} }
   }
 
   function createNewFile(){
@@ -778,7 +988,11 @@
 
   function saveCurrent(){
     if(!active) { showDialog('Save','No active file'); return }
-    const cur = editor.getValue()
+    let cur = editor.getValue()
+    try{
+      if(settings && settings.lineEnding === 'CRLF') cur = cur.replace(/\r\n|\r|\n/g, '\r\n')
+      else cur = cur.replace(/\r\n|\r|\n/g, '\n')
+    }catch(e){}
     files[active] = cur
     // saved -> update buffer to match saved state
     buffers[active] = cur
@@ -796,7 +1010,14 @@
 
   function saveAll(){
     // save all open files; ensure current editor is saved
-    if(active && editor) files[active] = editor.getValue()
+    if(active && editor){
+      try{
+        let v = editor.getValue()
+        if(settings && settings.lineEnding === 'CRLF') v = v.replace(/\r\n|\r|\n/g, '\r\n')
+        else v = v.replace(/\r\n|\r|\n/g, '\n')
+        files[active] = v
+      }catch(e){ files[active] = editor.getValue() }
+    }
     // update lastSaved snapshots for all files we just saved
     try{ Object.keys(files).forEach(n=> lastSaved[n] = files[n]) }catch(e){}
     saveToStorage()
@@ -1161,8 +1382,17 @@
     function clearMarkers(){
       try{
         if(!editor) return
-        const s = editor.getSession()
-        markerIds.forEach(id=>{ try{ s.removeMarker(id) }catch(e){} })
+        markerIds.forEach(obj=>{
+          try{
+            if(typeof obj === 'number'){
+              try{ editor.getSession().removeMarker(obj) }catch(_){ }
+            }else if(obj && obj.id && obj.sess && typeof obj.sess.removeMarker === 'function'){
+              try{ obj.sess.removeMarker(obj.id) }catch(_){ }
+            }else if(obj && obj.id){
+              try{ editor.getSession().removeMarker(obj.id) }catch(_){ }
+            }
+          }catch(e){}
+        })
         markerIds = []
       }catch(e){}
     }
@@ -1187,10 +1417,15 @@
         while(true){
           const found = searchLine.indexOf(needle, idx)
           if(found === -1) break
-          // create range
+          // create range with validation
           if(Range){
-            const range = new Range(r, found, r, found + needle.length)
-            matches.push(range)
+            const startCol = found
+            const endCol = found + Math.max(1, needle.length)
+            const lineLen = (line || '').length
+            if(Number.isFinite(startCol) && Number.isFinite(endCol) && endCol > startCol && startCol >= 0 && startCol <= lineLen){
+              const range = new Range(r, startCol, r, startCol + needle.length)
+              matches.push(range)
+            }
           }
           idx = found + Math.max(1, needle.length)
         }
@@ -1201,7 +1436,7 @@
           matches.forEach((rng,i)=>{
             const cl = 'ace_search_highlight'
             const id = editor.getSession().addMarker(rng, cl, 'text', false)
-            markerIds.push(id)
+            markerIds.push({id: id, sess: editor.getSession()})
           })
         }
       }catch(e){ console.error('marker add failed', e) }
@@ -1219,7 +1454,7 @@
           matches.forEach((rng,i)=>{
             const cl = (i===current) ? 'ace_search_active' : 'ace_search_highlight'
             const id = editor.getSession().addMarker(rng, cl, 'text', false)
-            markerIds.push(id)
+            markerIds.push({id: id, sess: editor.getSession()})
           })
         }
       }catch(e){ console.error(e) }
@@ -1859,6 +2094,62 @@
         if(panel && input){ panel.style.display = ''; input.value = q; if(caseEl) caseEl.checked = false; input.dispatchEvent(new Event('input')) }
         break }
 
+      case 'changeAll':{
+        // multi-select every occurrence of the last clicked/selected term
+        try{
+          const sess = editor && editor.getSession && editor.getSession()
+          if(!editor || !sess) break
+          // prefer current selection, fallback to last clicked term
+          let q = editor.getSelectedText && editor.getSelectedText()
+          if(!q) q = (window._miniVSC && window._miniVSC._lastClickedTerm && window._miniVSC._lastClickedTerm()) || ''
+          const qType = (window._miniVSC && window._miniVSC._lastClickedType && window._miniVSC._lastClickedType()) || null
+          if(!q) { showDialog('Change All','No term selected'); break }
+          // find ranges (token-aware when possible)
+          const doc = sess.getDocument(); const lines = doc.getAllLines()
+          const ranges = []
+          const Range = ace.require && ace.require('ace/range') ? ace.require('ace/range').Range : null
+          for(let r=0;r<lines.length;r++){
+            try{
+              if(qType && sess.getTokens){
+                const toks = sess.getTokens(r) || []
+                let col = 0
+                for(let ti=0; ti<toks.length; ti++){
+                  const tk = toks[ti]
+                  const raw = (tk.value||'')
+                  const norm = raw.replace(/[<>\\/]/g,'').trim()
+                  const matches = (norm === q) && ( (typeof tk.type === 'string') ? (String(qType).split('.')[0] === String(tk.type).split('.')[0]) : true )
+                  if(matches){ ranges.push({start:{row:r, column:col}, end:{row:r, column: col + raw.length}}) }
+                  col += raw.length
+                }
+                continue
+              }
+            }catch(e){ /* fallback to substring */ }
+            // substring fallback
+            const line = lines[r]
+            let idx = 0
+            while(true){
+              const found = line.indexOf(q, idx)
+              if(found === -1) break
+              ranges.push({start:{row:r, column:found}, end:{row:r, column: found + q.length}})
+              idx = found + Math.max(1, q.length)
+            }
+          }
+          if(ranges.length===0){ showDialog('Change All','No occurrences found'); break }
+          // clear selection and add multiple ranges
+          editor.selection.clearSelection()
+          if(Range){
+            ranges.forEach((r, i)=>{
+              const range = new Range(r.start.row, r.start.column, r.end.row, r.end.column)
+              try{
+                if(i===0) editor.selection.setSelectionRange(range, false)
+                else editor.selection.addRange(range, false)
+              }catch(e){}
+            })
+            editor.focus()
+          }
+        }catch(e){ console.error('changeAll', e); showDialog('Change All','Failed: '+(e&&e.message)) }
+        break }
+
       // Tools
       case 'trimWhitespace':{
         if(!editor) break
@@ -2077,13 +2368,19 @@
       clearGutterDecorations(active)
       const modifiedRows = []
       const savedRows = []
+      // compute error lines for the active file (errors store 1-based line numbers)
+      const errorLinesSet = new Set((errors || []).filter(e=> e && e.source === active && e.line).map(e=> Number(e.line) - 1))
       const max = Math.max(curLines.length, savedLines.length)
       for(let i=0;i<max;i++){
         const a = curLines[i] || ''
         const b = savedLines[i] || ''
         if(a !== b){
-          // mark modified line (orange)
-          try{ if(typeof sess.addGutterDecoration === 'function') sess.addGutterDecoration(i, 'line-modified') }catch(e){}
+          // if this line has an error, mark as error (red); otherwise modified (orange)
+          if(errorLinesSet.has(i)){
+            try{ if(typeof sess.addGutterDecoration === 'function') sess.addGutterDecoration(i, 'line-error') }catch(e){}
+          }else{
+            try{ if(typeof sess.addGutterDecoration === 'function') sess.addGutterDecoration(i, 'line-modified') }catch(e){}
+          }
           modifiedRows.push(i)
         }else{
           // mark saved/unchanged line (green)
@@ -2113,9 +2410,19 @@
     // load UI settings (including autosave) and apply them
     try{ loadSettings(); applySettings() }catch(e){}
     renderFileList()
-    // open index.html by default
-    const defaultOpen = Object.keys(files).includes('index.html')? 'index.html' : Object.keys(files)[0]
-    if(defaultOpen) openFile(defaultOpen)
+    // restore previously opened tabs if present; otherwise start with no file open
+    try{
+      const last = (settings && settings.lastTabs && Array.isArray(settings.lastTabs)) ? settings.lastTabs.filter(n=> n in files) : []
+      tabs = last.slice()
+      renderTabs(); renderFileList()
+      const lastActive = (settings && settings.lastActive && (settings.lastActive in files)) ? settings.lastActive : null
+      if(lastActive) openFile(lastActive)
+      else {
+        // ensure editor cleared and placeholder shown
+        try{ if(editor) editor.setValue('', -1) }catch(e){}
+        try{ const ph = document.getElementById('editor-placeholder'); if(ph) ph.style.display = 'flex' }catch(e){}
+      }
+    }catch(e){ console.warn('restore tabs failed', e) }
     // ensure menu conditionals reflect initial selection state
     try{ if(typeof updateMenuConditionals === 'function') updateMenuConditionals() }catch(e){}
 
@@ -2147,6 +2454,12 @@
       const pc = document.getElementById('preview-container')
       pc.style.display = pc.style.display === 'none' ? 'block' : 'none'
     }
+
+    // placeholder click -> create new file
+    try{
+      const ph = document.getElementById('editor-placeholder')
+      if(ph){ ph.addEventListener('click', ()=> { createNewFile() }) }
+    }catch(e){}
 
     // cheatsheet close handler
     try{
@@ -2449,6 +2762,51 @@
 
   // Kick off: load settings, ensure Ace is loaded first, then setup editor and init app
   loadSettings()
+  
+  // Try to sample the project's favicon and tune editor colors dynamically
+  function sampleFaviconAndApply(){
+    try{
+      const img = new Image(); img.crossOrigin = 'Anonymous'
+      const src = (location.pathname && location.pathname.indexOf('/')===0) ? 'favicon.png' : 'favicon.png'
+      img.onload = function(){
+        try{
+          const c = document.createElement('canvas')
+          c.width = 8; c.height = 8
+          const cx = c.getContext('2d')
+          cx.drawImage(img, 0, 0, c.width, c.height)
+          const d = cx.getImageData(0,0,c.width,c.height).data
+          // simple heuristic: prefer red+blue palette (avoid purple). Use average channels to pick dominant
+          let rsum=0, gsum=0, bsum=0, count=0
+          for(let i=0;i<d.length;i+=4){ const alpha=d[i+3]; if(alpha===0) continue; rsum+=d[i]; gsum+=d[i+1]; bsum+=d[i+2]; count++ }
+          if(count===0) return
+          const ravg = Math.round(rsum/count), gavg = Math.round(gsum/count), bavg = Math.round(bsum/count)
+          // prefer red/blue. If reds dominate, primary=red, secondary=blue; otherwise reverse.
+          const redPrimary = 'rgb(220,64,64)'
+          const bluePrimary = 'rgb(38,122,255)'
+          const redSecondary = 'rgb(38,122,255)'
+          const blueSecondary = 'rgb(220,64,64)'
+          const primary = (ravg >= bavg) ? redPrimary : bluePrimary
+          const sec = (ravg >= bavg) ? redSecondary : blueSecondary
+          document.documentElement.style.setProperty('--accent', primary)
+          document.documentElement.style.setProperty('--accent-2', sec)
+          // inject ace token overrides to approximate palette
+          const styleId = 'mini-vsc-accent-overrides'
+          let s = document.getElementById(styleId)
+          if(!s){ s = document.createElement('style'); s.id = styleId; document.head.appendChild(s) }
+          s.textContent = `
+            .ace_editor .ace_keyword{ color: ${sec} !important }
+            .ace_editor .ace_storage, .ace_editor .ace_support { color: ${primary} !important }
+            .ace_editor .ace_string { color: ${sec} !important }
+            .ace_editor .ace_comment { color: rgba(255,255,255,0.45) !important }
+            .ace_marker-layer .ace_selection { background: ${primary}33 !important }
+            .ace_gutter-cell.line-saved { border-left-color: ${primary} !important }
+          `
+        }catch(e){ console.warn('favicon sample processing failed', e) }
+      }
+      img.onerror = function(){ /* ignore */ }
+      img.src = src
+    }catch(e){ console.warn('sampleFaviconAndApply', e) }
+  }
   ensureAceLoaded(()=>{
     setupEditor()
     // apply persisted UI settings once editor exists
@@ -2457,6 +2815,39 @@
     setupMenu()
     // make sure editor resizes to fill area
     setTimeout(()=> editor.resize(), 50)
+    // add EOL (LF/CRLF) toggle in status bar
+    try{
+      const sr = document.getElementById('status-right') || statusRight
+      if(sr){
+        const eol = document.createElement('span')
+        eol.id = 'status-eol'
+        eol.style.cursor = 'pointer'
+        eol.style.marginLeft = '12px'
+        eol.style.color = 'var(--muted)'
+        eol.textContent = (settings && settings.lineEnding) ? (settings.lineEnding === 'CRLF' ? 'CRLF' : 'LF') : 'LF'
+        eol.title = 'Click to toggle line endings (LF/CRLF)'
+        eol.addEventListener('click', ()=>{
+          try{
+            settings.lineEnding = (settings.lineEnding === 'CRLF') ? 'LF' : 'CRLF'
+            eol.textContent = (settings.lineEnding === 'CRLF') ? 'CRLF' : 'LF'
+            saveSettings()
+            // normalize current editor buffer to new ending
+            if(editor){
+              const v = editor.getValue().replace(/\r\n|\r|\n/g, settings.lineEnding === 'CRLF' ? '\r\n' : '\n')
+              const pos = editor.getCursorPosition()
+              editor.setValue(v, -1)
+              try{ editor.moveCursorToPosition(pos) }catch(e){}
+              scheduleDirtyUpdate()
+            }
+            updateStatus('Line endings: ' + (settings.lineEnding === 'CRLF' ? 'CRLF' : 'LF'))
+          }catch(e){ console.error('toggleEOL', e) }
+        })
+        sr.appendChild(eol)
+      }
+    }catch(e){ console.warn('EOL toggle init failed', e) }
+
+    // sample favicon and tune editor colors
+    try{ if(typeof sampleFaviconAndApply === 'function') sampleFaviconAndApply() }catch(e){ console.warn('favicon sample failed', e) }
   })
 
   // expose for debug
