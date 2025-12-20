@@ -122,6 +122,7 @@
 
   // Ace Editor placeholder — will be initialized after Ace loads
   let editor = null
+  let euphModeInstance = null
   let buildOutlineFn = null
   // global problems/errors list so various tools can push diagnostics
   let errors = []
@@ -165,6 +166,7 @@
 
 
   function setupEditor(){
+    try{ if(typeof registerEuphMode === 'function') registerEuphMode() }catch(e){}
     editor = ace.edit('editor')
     // Remove Ace's built-in settings shortcut (Ctrl+, / Command+,) which
     // opens an editor settings panel that we don't want in this UI.
@@ -475,6 +477,86 @@
 
   }
 
+  // Register a lightweight Ace mode for .euph/.huph files to provide basic colouring
+  function registerEuphMode(){
+    try{
+      if(euphModeInstance || !window.ace) return
+      const oop = ace.require('ace/lib/oop')
+      const TextMode = ace.require('ace/mode/text').Mode
+      const TextHighlightRules = ace.require('ace/mode/text_highlight_rules').TextHighlightRules
+
+      const EuphHighlightRules = function(){
+        const commands = ['tremolo','rest','measure','triplet','quintuplet','septuplet','semiquaverMeasure','quaverMeasure','minimMeasure','crochetMeasure','crotchetMeasure','demisemiquaverMeasure']
+        const durations = Array.from(DURATIONS).join('|')
+        this.$rules = {
+          start: [
+            { token: 'euph_command', regex: '\\b(' + commands.join('|') + ')\\b', caseInsensitive: true },
+            { token: 'euph_duration', regex: '\\b(' + durations + ')\\b', caseInsensitive: true },
+            { token: 'euph_pitch', regex: '\\b[a-g][#`n]?\\d\\b', caseInsensitive: true },
+            { token: 'euph_rest', regex: '\\brest\\b', caseInsensitive: true },
+            { token: 'euph_bar', regex: '\\|' },
+            { token: 'euph_tupletp', regex: '-' },
+            { defaultToken: 'text' }
+          ]
+        }
+      }
+      oop.inherits(EuphHighlightRules, TextHighlightRules)
+
+      const Mode = function(){
+        this.HighlightRules = EuphHighlightRules
+      }
+      oop.inherits(Mode, TextMode)
+      Mode.prototype.$id = 'ace/mode/euph'
+      try{
+        // define module so Ace can reference by name
+        ace.define('ace/mode/euph', ['require','exports','module','ace/lib/oop','ace/mode/text','ace/mode/text_highlight_rules'], function(require, exports, module){
+          const oop = require('ace/lib/oop')
+          const TextMode = require('ace/mode/text').Mode
+          const TextHighlightRules = require('ace/mode/text_highlight_rules').TextHighlightRules
+          function EuphHighlightRulesLocal(){
+            const commands = ['tremolo','rest','measure','triplet','quintuplet','septuplet','semiquaverMeasure','quaverMeasure','minimMeasure','crochetMeasure','crotchetMeasure','demisemiquaverMeasure']
+            const durations = Array.from(DURATIONS).join('|')
+            this.$rules = {
+              start: [
+                { token: 'euph_command', regex: '\\b(' + commands.join('|') + ')\\b', caseInsensitive: true },
+                { token: 'euph_duration', regex: '\\b(' + durations + ')\\b', caseInsensitive: true },
+                { token: 'euph_pitch', regex: '\\b[a-g][#`n]?\\d\\b', caseInsensitive: true },
+                { token: 'euph_rest', regex: '\\brest\\b', caseInsensitive: true },
+                { token: 'euph_bar', regex: '\\|' },
+                { token: 'euph_tupletp', regex: '-' },
+                { defaultToken: 'text' }
+              ]
+            }
+          }
+          oop.inherits(EuphHighlightRulesLocal, TextHighlightRules)
+          const ModeLocal = function(){ this.HighlightRules = EuphHighlightRulesLocal }
+          oop.inherits(ModeLocal, TextMode)
+          exports.Mode = ModeLocal
+        })
+        euphModeInstance = 'ace/mode/euph'
+        // inject styling for euph tokens to mimic euph.html colours
+        try{
+          const sid = 'mini-vsc-euph-styles'
+          if(!document.getElementById(sid)){
+            const s = document.createElement('style')
+            s.id = sid
+            s.textContent = `
+              .ace_editor .ace_euph_pitch { color: #00ff00; }
+              .ace_editor .ace_euph_duration { color: #00bfff; }
+              .ace_editor .ace_euph_command { color: #ff5555; }
+              .ace_editor .ace_euph_rest { color: #ffcc66; }
+              .ace_editor .ace_euph_bar, .ace_editor .ace_euph_tupletp { color: #ffffff; }
+            `
+            document.head.appendChild(s)
+          }
+        }catch(e){}
+      }catch(e){
+        // fallback to instance when define fails
+        euphModeInstance = new Mode()
+      }
+    }catch(e){ console.warn('registerEuphMode failed', e) }
+  }
+
   // helper debounce
   function debounce(fn, delay){
     let t = null
@@ -722,6 +804,317 @@
   try{ if(typeof startCreateFile === 'function') var startCreateFileInline = startCreateFile }catch(e){}
   try{ if(typeof startRename === 'function') var startRenameInline = startRename }catch(e){}
 
+  /* --- Euphonia multi-file playback (.huph/.euph) --- */
+  const AudioCtx = new (window.AudioContext || window.webkitAudioContext)()
+  const baseFreqs = { c:261.63, d:293.66, e:329.63, f:349.23, g:392, a:440, b:493.88 }
+  const DURATIONS = new Set(['crotchet','quaver','semiquaver','semiquavers','demisemiquaver','minim','simibreve'])
+  function durToSec(d,bpm){ if(!d) return 60/bpm/4; switch(d.toLowerCase()){ case 'crochet': case 'crotchet': return 60/bpm; case 'quaver': return 30/bpm; case 'semiquaver': case 'semiquavers': return 15/bpm; case 'demisemiquaver': return 7.5/bpm; case 'minim': return 120/bpm; case 'semibreve': case 'simibreve': return 240/bpm; default: return 60/bpm/4 } }
+  function isNoteToken(tok){ return /^[a-g][#`n]?\d$/i.test(tok) }
+  function isDurationToken(tok){ return tok && DURATIONS.has(tok.toLowerCase()) }
+  function noteFreq(note, keyAcc, accState){
+    const m = note.match(/^([a-g])([#`n]?)(\d)$/i); if(!m) return 440; let [, letter, acc, oct] = m; letter = letter.toLowerCase(); oct = parseInt(oct,10);
+    if(acc) accState[letter] = acc; else if(accState[letter]) acc = accState[letter];
+    if(!acc){ const keyMap = {}; (keyAcc||[]).forEach(k=>{ const l=k[0].toLowerCase(); if(k.endsWith('#')) keyMap[l]='#'; else if(k.endsWith('`')) keyMap[l]='`'; else keyMap[l]='' }); acc = keyMap[letter] || '' }
+    let f = baseFreqs[letter]; if(acc === '`') f *= Math.pow(2, -1/12); else if(acc === '#') f *= Math.pow(2, 1/12); return f * Math.pow(2, oct - 4)
+  }
+
+  function playOsc(freq, dur, waveType='triangle', gainOverride=null){
+    return new Promise(resolve=>{
+      try{
+        if(playbackState.stopRequested || playbackState.isPaused) return resolve();
+        const o = AudioCtx.createOscillator(); const g = AudioCtx.createGain(); o.type = waveType; o.frequency.value = freq; g.gain.value = gainOverride!==null? gainOverride : 0.08; o.connect(g); g.connect(AudioCtx.destination);
+        const startAt = Math.max(AudioCtx.currentTime + 0.005, AudioCtx.currentTime)
+        playbackState.currentOscillators.push(o)
+        o.start(startAt)
+        o.stop(startAt + dur)
+        o.onended = function(){ try{ playbackState.currentOscillators = playbackState.currentOscillators.filter(x=>x!==o) }catch(e){}; resolve() }
+      }catch(e){ resolve() }
+    })
+  }
+
+  // parse header text (.huph). Accept JSON { "voiceJson": "..", "euphFiles": [..] } or simple lines: first=voicejson, rest=euph paths
+  function parseHuphText(text){
+    try{
+      const j = safeJsonParse(text)
+      if(j && (j.voiceJson || j.voiceJSON) && j.euphFiles) return { voiceJson: j.voiceJson||j.voiceJSON, euphFiles: Array.isArray(j.euphFiles)? j.euphFiles : [j.euphFiles] }
+    }catch(e){}
+    const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean)
+    if(lines.length===0) return null
+    return { voiceJson: lines[0], euphFiles: lines.slice(1) }
+  }
+
+  // forgiving JSON parser: strip BOM, comments, trailing commas then parse
+  function safeJsonParse(src){
+    if(!src && src !== '') return null
+    try{ return JSON.parse(src) }catch(_){ }
+    try{
+      let s = String(src)
+      // strip BOM
+      s = s.replace(/^\uFEFF/, '')
+      // try to trim any leading garbage before first object/array
+      const firstBrace = s.indexOf('{')
+      const firstBracket = s.indexOf('[')
+      const firstOpen = (firstBrace === -1) ? firstBracket : (firstBracket === -1 ? firstBrace : Math.min(firstBrace, firstBracket))
+      if(firstOpen > 0) s = s.slice(firstOpen)
+      // remove block comments
+      s = s.replace(/\/\*[\s\S]*?\*\//g, '')
+      // remove line comments
+      s = s.replace(/(^|\s)\/\/.*$/gm, '')
+      // remove trailing commas in objects/arrays
+      s = s.replace(/,\s*([}\]])/g, '$1')
+      return JSON.parse(s)
+    }catch(e){
+      // rethrow to let caller show meaningful message
+      throw new Error((e && e.message) ? e.message : 'Invalid JSON')
+    }
+  }
+
+  let playbackState = { isPlaying:false, isPaused:false, stopRequested:false, currentOscillators:[] }
+  function stopPlayback(){ playbackState.stopRequested=true; playbackState.isPlaying=false; playbackState.isPaused=false; playbackState.currentOscillators.forEach(o=>{ try{o.stop()}catch(e){} }); playbackState.currentOscillators=[] }
+  function pausePlayback(){ playbackState.isPaused=true; playbackState.isPlaying=false; playbackState.currentOscillators.forEach(o=>{ try{o.stop()}catch(e){} }); playbackState.currentOscillators=[] }
+
+  // show/hide Play menu based on active file
+  function updatePlayMenuVisibility(name){ try{ const playMenu = document.getElementById('menu-play'); if(!playMenu) return; if(name && name.toLowerCase().endsWith('.huph')) playMenu.style.display = ''; else playMenu.style.display = 'none' }catch(e){} }
+  // wire Play menu actions
+  try{
+    const playAllBtn = document.getElementById('play-all-voices'); if(playAllBtn) playAllBtn.addEventListener('click', ()=>{ playAllVoicesForActiveHeader() })
+    const pauseBtn = document.getElementById('play-pause'); if(pauseBtn) pauseBtn.addEventListener('click', ()=> pausePlayback())
+    const stopBtnEl = document.getElementById('play-stop'); if(stopBtnEl) stopBtnEl.addEventListener('click', ()=> stopPlayback())
+  }catch(e){}
+
+  // main orchestrator: when a .huph header is active, parse it and play referenced .euph files
+  async function playAllVoicesForActiveHeader(){
+    if(!active || !active.toLowerCase().endsWith('.huph')){ showDialog('No header','Open a .huph header file to Play All'); return }
+    const headerText = (buffers[active] !== undefined) ? buffers[active] : (files[active] || '')
+    const header = parseHuphText(headerText)
+    if(!header){ showDialog('Invalid header','Could not parse the .huph header file. Expected JSON or newline list.'); return }
+    // resolve basenames against stored files in memory; header paths may be basenames
+    // resolve voice JSON: support three forms
+    // 1) header.voiceJson is an object (already parsed)
+    // 2) header.voiceJson is a JSON string (inline)
+    // 3) header.voiceJson is a filename -> load from `files`
+    let voicesJson = {}
+    try{
+      if(typeof header.voiceJson === 'object' && header.voiceJson !== null){
+        voicesJson = header.voiceJson
+      } else if(typeof header.voiceJson === 'string'){
+        const vstr = header.voiceJson.trim()
+        if(vstr.startsWith('{')){
+          // inline JSON string
+          voicesJson = safeJsonParse(vstr)
+        } else {
+          // treat as filename; support path or basename
+          const vname = vstr.split(/[\\/]/).pop()
+          if(!files[vname]){ showDialog('Missing', 'Voice JSON "' + vname + '" is not present in project files. Add it and try again.'); return }
+          voicesJson = safeJsonParse(files[vname])
+        }
+      } else {
+        showDialog('Missing','Voice JSON reference is invalid in header. Provide a filename or inline JSON.'); return
+      }
+    }catch(e){ showDialog('Invalid JSON','Failed to parse voice JSON: ' + (e && e.message)); return }
+    // collect voices
+    const voices = []
+    for(let i=0;i<header.euphFiles.length;i++){
+      const path = header.euphFiles[i]; const base = path.split(/[\\/]/).pop(); if(!files[base]){ showDialog('Missing', 'Euph file "' + base + '" not found in project.'); return }
+      const number = String(i+1)
+      let wave = 'triangle'
+      let volume = 1
+      const entry = voicesJson[number]
+      if(entry !== undefined){
+        if(Array.isArray(entry)){
+          wave = entry[0] || 'triangle'
+          const v = entry.length > 1 ? Number(entry[1]) : 1
+          volume = (Number.isFinite(v) && v >= 0) ? v : 1
+        }else if(typeof entry === 'object' && entry !== null){
+          wave = entry.wave || entry.type || 'triangle'
+          const v = Number(entry.volume !== undefined ? entry.volume : (entry.vol !== undefined ? entry.vol : 1))
+          volume = (Number.isFinite(v) && v >= 0) ? v : 1
+        }else{
+          wave = String(entry) || 'triangle'
+          volume = 1
+        }
+      }
+      voices.push({ name: base, content: files[base], wave, volume })
+    }
+    // play voices in parallel measure-by-measure similar to euph editor
+    playbackState.stopRequested=false; playbackState.isPaused=false; playbackState.isPlaying=true; playbackState.currentOscillators=[]
+
+    // key signature map (copied from euph.html)
+    const keySignatures = {
+      'C Major': [], 'C minor': ['B`', 'E`', 'A`'],
+      'C# Major': ['F#', 'C#', 'G#', 'D#', 'A#', 'E#', 'B#'], 'C# minor': ['F#', 'C#', 'G#'],
+      'D` Major': ['B`', 'E`', 'A`', 'D`', 'G`'], 'D` minor': ['E`', 'A`', 'D`', 'G`'],
+      'D Major': ['F#', 'C#'], 'D minor': ['B`'],
+      'D# Major': ['F#', 'C#', 'G#', 'D#', 'A#', 'E#'], 'D# minor': ['F#', 'C#', 'G#', 'D#'],
+      'E Major': ['F#', 'C#', 'G#', 'D#'], 'E minor': ['F#'],
+      'F Major': ['B`'], 'F minor': ['B`', 'E`', 'A`', 'D`'],
+      'F# Major': ['F#', 'C#', 'G#', 'D#', 'A#', 'E#'], 'F# minor': ['F#', 'C#', 'G#'],
+      'G Major': ['F#'], 'G minor': ['B`', 'E`', 'A`'],
+      'G# Major': ['F#', 'C#', 'G#', 'D#', 'A#', 'E#', 'B#'], 'G# minor': ['F#', 'C#', 'G#', 'D#'],
+      'A Major': ['F#', 'C#', 'G#'], 'A minor': [],
+      'A# Major': ['F#', 'C#', 'G#', 'D#', 'A#', 'E#'], 'A# minor': ['F#', 'C#', 'G#', 'D#'],
+      'B Major': ['F#', 'C#', 'G#', 'D#', 'A#'], 'B minor': ['F#', 'C#'],
+      "B` Major": ['B`', 'E`', 'A`', 'D`', 'G`'], "B` minor": ['B`', 'E`', 'A`', 'D`', 'G`'],
+      "E` Major": ['B`', 'E`', 'A`', 'D`'], "E` minor": ['B`', 'E`', 'A`'],
+      "A` Major": ['B`', 'E`', 'A`'], "A` minor": ['B`', 'E`'],
+      "D`` Major": ['B`', 'E`', 'A`', 'D`'], "D`` minor": ['B`', 'E`', 'A`'],
+      "G`` Major": ['B`', 'E`', 'A`'], "G`` minor": ['B`', 'E`'],
+      "C`` Major": ['B`'], "C`` minor": ['B`', 'E`', 'A`', 'D`', 'G`', 'C`']
+    }
+
+    function parseEditorContent(text){
+      const rawLines = text.split('\n').map(l=>l.trim()).filter(Boolean)
+      if(rawLines.length===0) return null
+      let key = 'C Major', bpm = 120
+      const headerMatch = rawLines[0] && rawLines[0].match(/\(?\s*([^,]+)\s*,\s*([0-9]+)bpm/i)
+      if(headerMatch){ key = headerMatch[1].trim(); bpm = parseInt(headerMatch[2],10) || 120 }
+      const keyAcc = keySignatures[key] || []
+      const contentLines = headerMatch ? rawLines.slice(1) : rawLines
+      return { bpm, keyAcc, contentLines }
+    }
+    function splitMeasures(lines){ return lines.flatMap(line => line.split('|').map(m=>m.trim()).filter(Boolean)) }
+
+    const parsed = voices.map(v=>{ const p = parseEditorContent(v.content); return { meta:v, parsed:p, measures: splitMeasures(p.contentLines) } })
+    const maxMeasures = Math.max(...parsed.map(p=>p.measures.length))
+
+    async function playMeasure(tokens, bpm, keyAcc, waveType, gainOverride, anchorStart){
+      if(!tokens || tokens.length===0) return 0
+      // schedule notes precisely using AudioContext time to avoid JS timer lag
+      // use provided anchorStart so all voices for the same measure share the same AudioContext reference
+      const startNow = (typeof anchorStart === 'number') ? anchorStart : (AudioCtx.currentTime + 0.02)
+      let curTime = startNow
+      let i = 0
+      let measureDurOverride = null
+      const promises = []
+      const accState = {}
+
+      const isStaccatoDur = (d) => {
+        if(!d) return false
+        const dd = d.toLowerCase()
+        return dd === 'quaver' || dd === 'crochet' || dd === 'crotchet'
+      }
+      function scheduleOsc(startAt, freq, playDur, wave, gain){
+        return new Promise(resolve=>{
+          try{
+            if(playbackState.stopRequested || playbackState.isPaused) return resolve()
+            const o = AudioCtx.createOscillator()
+            const g = AudioCtx.createGain()
+            o.type = wave
+            o.frequency.value = freq
+            g.gain.value = gain!==null? gain : 0.08
+            o.connect(g); g.connect(AudioCtx.destination)
+            playbackState.currentOscillators.push(o)
+            const startAtClamped = Math.max(startAt, AudioCtx.currentTime + 0.005)
+            o.start(startAtClamped)
+            o.stop(startAtClamped + playDur)
+            // resolve when oscillator ends to ensure accurate timing
+            o.onended = function(){
+              try{ playbackState.currentOscillators = playbackState.currentOscillators.filter(x=>x!==o) }catch(e){}
+              resolve()
+            }
+          }catch(e){ resolve() }
+        })
+      }
+
+      while(i<tokens.length){
+        if(playbackState.stopRequested) break
+        while(playbackState.isPaused) await new Promise(r=>setTimeout(r,100))
+        const t = tokens[i]
+        if(!t){ i++; continue }
+        if(['semiquaverMeasure','quaverMeasure','minimMeasure','crochetMeasure','crotchetMeasure','demisemiquaverMeasure'].includes(t)){
+          measureDurOverride = t.replace('Measure','').toLowerCase(); i++; continue
+        }
+        if(t.toLowerCase() === 'rest'){
+          const next = tokens[i+1]
+          let durTok = isDurationToken(next)? next.toLowerCase() : (measureDurOverride || 'quaver')
+          if(measureDurOverride && ['quaver','semiquaver','minim','crochet','crotchet','demisemiquaver'].includes(measureDurOverride)) durTok = measureDurOverride
+          const baseDur = durToSec(durTok, bpm)
+          curTime += baseDur
+          i += isDurationToken(next)? 2 : 1
+          continue
+        }
+        if(['triplet','quintuplet','septuplet'].includes(t.toLowerCase())){
+          const tupletType = t.toLowerCase()
+          const base = tokens[i+1]
+          i += 2
+          if(tokens[i] === '-'){
+            i++
+            const group = []
+            while(i<tokens.length && tokens[i] !== '-') { group.push(tokens[i]); i++ }
+            if(tokens[i] === '-') i++
+            const baseDur = durToSec(base, bpm)
+            // for triplet: 3 * scaledDur == unitForTuplet
+            let unitForTuplet = 'quaver'
+            if(tupletType === 'triplet'){
+              if(base.toLowerCase().startsWith('semiquaver')) unitForTuplet = 'quaver'
+              else if(base.toLowerCase().startsWith('quaver')) unitForTuplet = 'crochet'
+              else unitForTuplet = 'quaver'
+            } else if(tupletType === 'quintuplet'){
+              unitForTuplet = base
+            } else if(tupletType === 'septuplet'){
+              unitForTuplet = base
+            }
+            const scaledDur = durToSec(unitForTuplet, bpm) / (tupletType === 'triplet' ? 3 : (tupletType === 'quintuplet' ? 5 : 7))
+            for(const tok of group){
+              if(playbackState.stopRequested) break
+              if(isNoteToken(tok)){
+                const freq = noteFreq(tok, keyAcc, accState)
+                const playDur = isStaccatoDur(base) ? scaledDur * 0.5 : scaledDur
+                promises.push(scheduleOsc(curTime, freq, playDur, waveType, gainOverride))
+                curTime += scaledDur
+              } else if(tok.toLowerCase() === 'rest'){
+                curTime += scaledDur
+              }
+            }
+            continue
+          }
+        }
+        if(isNoteToken(t)){
+          const next = tokens[i+1]
+          let durTok = isDurationToken(next)? next.toLowerCase() : (measureDurOverride || 'quaver')
+          if(isDurationToken(next)) i += 2; else i += 1
+          if(measureDurOverride && ['quaver','semiquaver','minim','crochet','crotchet','demisemiquaver'].includes(measureDurOverride)) durTok = measureDurOverride
+          const baseDur = durToSec(durTok, bpm)
+          const playDur = isStaccatoDur(durTok) ? baseDur * 0.5 : baseDur
+          const freq = noteFreq(t, keyAcc, accState)
+          promises.push(scheduleOsc(curTime, freq, playDur, waveType, gainOverride))
+          curTime += baseDur
+          continue
+        }
+        i++
+      }
+      const total = Math.max(0, curTime - startNow)
+      await Promise.all(promises)
+      // ensure full measure time elapses (accounts for staccato where oscillators ended early)
+      const waitMs = Math.max(0, Math.round((curTime - AudioCtx.currentTime) * 1000))
+      if(waitMs > 0) await new Promise(r=> setTimeout(r, waitMs))
+      return total
+    }
+
+    // schedule measures against a single advancing anchor so there is no extra gap between measures
+    let measureAbsoluteTime = AudioCtx.currentTime + 0.02
+    for(let m=0;m<maxMeasures;m++){
+      const tasks = parsed.map(p=>{
+        const tokens = p.measures[m]? p.measures[m].split(/\s+/).filter(Boolean):[]
+        const bpm = p.parsed.bpm
+        const keyAcc = p.parsed.keyAcc
+        const wave = p.meta.wave
+        const volMult = (p.meta && typeof p.meta.volume === 'number') ? p.meta.volume : 1
+        let baseGain = 0.08
+        if(p.meta.name && p.meta.name.toLowerCase().includes('melody')) baseGain = 0.18
+        const gain = baseGain * volMult
+        return playMeasure(tokens,bpm,keyAcc,wave,gain, measureAbsoluteTime)
+      })
+      const results = await Promise.all(tasks)
+      // each playMeasure returns the scheduled duration for that voice's measure; advance anchor by the longest one
+      try{
+        const maxDur = Math.max(...(results.filter(r=>typeof r==='number' && isFinite(r)) || [0.001]))
+        measureAbsoluteTime += (maxDur || 0.001)
+      }catch(e){ measureAbsoluteTime = AudioCtx.currentTime + 0.02 }
+    }
+    playbackState.isPlaying=false
+  }
+
   // Add Multi-edit toggle into the Selection menu (provides multi-cursor support)
   try{
     const selMenu = document.getElementById('menu-selection')
@@ -902,6 +1295,8 @@
     try{ const ph = document.getElementById('editor-placeholder'); if(ph) ph.style.display = 'none' }catch(e){}
     // persist last-opened tabs / active file
     try{ settings.lastTabs = tabs.slice(); settings.lastActive = active; saveSettings() }catch(e){}
+    // update Play menu visibility when opening a file
+    try{ if(typeof updatePlayMenuVisibility === 'function') updatePlayMenuVisibility(name) }catch(e){}
   }
 
   function closeTab(name){
@@ -1031,9 +1426,24 @@
   }
 
   function modeFor(name){
-    if(name.endsWith('.js')) return 'ace/mode/javascript'
-    if(name.endsWith('.css')) return 'ace/mode/css'
-    return 'ace/mode/html'
+    try{
+      const n = (name || '').toLowerCase()
+      if(n.endsWith('.js')) return 'ace/mode/javascript'
+      if(n.endsWith('.css')) return 'ace/mode/css'
+      if(n.endsWith('.json')) return 'ace/mode/json'
+      // provide sensible highlighting for .huph and .euph
+      if(n.endsWith('.huph') || n.endsWith('.euph')){
+        // if file content starts with JSON object, use JSON mode
+        try{
+          const txt = (buffers[name] !== undefined) ? buffers[name] : (files[name] || '')
+          if(txt && txt.trim().startsWith('{')) return 'ace/mode/json'
+        }catch(e){}
+        // fallback to custom euph mode if registered
+        if(euphModeInstance) return euphModeInstance
+        return 'ace/mode/markdown'
+      }
+      return 'ace/mode/html'
+    }catch(e){ return 'ace/mode/text' }
   }
 
   // Build preview by taking index.html (if present) and injecting css/js
@@ -1983,6 +2393,7 @@
           try{
             const cur = editor.getValue()
             let out = cur
+            // HTML/CSS/JS use js-beautify when available
             if(active.endsWith('.html')){
               if(typeof html_beautify !== 'undefined') out = html_beautify(cur, {indent_size:2})
               else if(typeof js_beautify !== 'undefined') out = js_beautify(cur, {indent_size:2})
@@ -1991,6 +2402,22 @@
               else if(typeof js_beautify !== 'undefined') out = js_beautify(cur, {indent_size:2})
             }else if(active.endsWith('.js')){
               if(typeof js_beautify !== 'undefined') out = js_beautify(cur, {indent_size:2})
+            }else if(active.endsWith('.json')){
+              // Use forgiving parser then stringify for consistent JSON formatting
+              try{
+                const parsed = safeJsonParse(cur)
+                out = JSON.stringify(parsed, null, 2) + '\n'
+              }catch(e){
+                if(typeof js_beautify !== 'undefined') out = js_beautify(cur, {indent_size:2})
+                else throw e
+              }
+            }else if(active.endsWith('.huph')){
+              // .huph can be either JSON or simple-line format; if JSON-like, tidy JSON
+              const trimmed = cur.trim()
+              if(trimmed.startsWith('{')){
+                try{ const parsed = JSON.parse(trimmed); out = JSON.stringify(parsed, null, 2) + '\n' }catch(e){ if(typeof js_beautify !== 'undefined') out = js_beautify(cur, {indent_size:2}) }
+              }
+              // otherwise leave .huph as-is (it's a simple list format)
             }
             files[active] = out
             editor.setValue(out, -1)
