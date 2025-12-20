@@ -807,8 +807,8 @@
   /* --- Euphonia multi-file playback (.huph/.euph) --- */
   const AudioCtx = new (window.AudioContext || window.webkitAudioContext)()
   const baseFreqs = { c:261.63, d:293.66, e:329.63, f:349.23, g:392, a:440, b:493.88 }
-  const DURATIONS = new Set(['crotchet','quaver','semiquaver','semiquavers','demisemiquaver','minim','simibreve'])
-  function durToSec(d,bpm){ if(!d) return 60/bpm/4; switch(d.toLowerCase()){ case 'crochet': case 'crotchet': return 60/bpm; case 'quaver': return 30/bpm; case 'semiquaver': case 'semiquavers': return 15/bpm; case 'demisemiquaver': return 7.5/bpm; case 'minim': return 120/bpm; case 'semibreve': case 'simibreve': return 240/bpm; default: return 60/bpm/4 } }
+  const DURATIONS = new Set(['crotchet','quaver','semiquaver','semiquavers','demisemiquaver','minim','semibreve'])
+  function durToSec(d,bpm){ if(!d) return 60/bpm/4; switch(d.toLowerCase()){ case 'crochet': case 'crotchet': return 60/bpm; case 'quaver': return 30/bpm; case 'semiquaver': case 'semiquavers': return 15/bpm; case 'demisemiquaver': return 7.5/bpm; case 'minim': return 120/bpm; case 'semibreve': case 'semibreve': return 240/bpm; default: return 60/bpm/4 } }
   function isNoteToken(tok){ return /^[a-g][#`n]?\d$/i.test(tok) }
   function isDurationToken(tok){ return tok && DURATIONS.has(tok.toLowerCase()) }
   function noteFreq(note, keyAcc, accState){
