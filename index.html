@@ -700,7 +700,7 @@
   <div id="app">
     <div id="sidebar">
       <div class="sidebar-header">
-        <strong>Nua Code Studio</strong>
+        <strong>NuaCode</strong>
         <div class="sidebar-actions">
           <button id="new-file" title="New file"><span class="msr">add</span></button>
           <button id="save-file" title="Save"><span class="msr">save</span></button>
@@ -784,6 +784,13 @@
             <div class="item" data-action="stop">Stop Preview</div>
             <div class="item" data-action="lint">Run Lint</div>
             <div class="item" data-action="autoRefresh">Toggle Auto Refresh</div>
+          </div>
+        </div>
+        <div class="menu" id="menu-play" style="display:none">Play
+          <div class="dropdown">
+            <div class="item" id="play-all-voices">Play All Voices</div>
+            <div class="item" id="play-pause">Pause</div>
+            <div class="item" id="play-stop">Stop</div>
           </div>
         </div>
         <div class="menu" id="menu-help">Help
@@ -905,7 +912,7 @@
   <div id="cheatsheet-modal" style="display:none; position:fixed; inset:0; align-items:center; justify-content:center; z-index:10000;">
     <div style="width:760px; max-width:95%; background:var(--panel); border:1px solid rgba(255,255,255,0.04); padding:18px; border-radius:8px; color:var(--muted);">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-        <strong style="color:#fff;">Shortcuts</strong>
+        <strong style="color:#fff;">NuaCode Cheatsheet — Shortcuts</strong>
         <button id="cheatsheet-close" class="btn-close">✕</button>
       </div>
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; font-family:monospace; font-size:13px; color:#d7e0e8;">
